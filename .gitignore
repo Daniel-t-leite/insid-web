@@ -1,0 +1,20 @@
+# Ambientes virtuais Python
+venv/
+.venv/
+env/
+ENV/
+
+# Bytecode e caches Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Segredos e variáveis locais
+.env
+.env.*
+.streamlit/secrets.toml
+
+# Ficheiros de sistema
+.DS_Store
+Thumbs.db
