@@ -94,67 +94,226 @@ def _migrar_seed_local_para_turso_se_vazio(conn) -> None:
             )
 
 
+def _criar_tabelas_schema(cursor) -> None:
+    """Cria todas as tabelas com schema compatível com SQLite local e Turso (foreign_keys=ON)."""
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS usuarios (
+        codigo TEXT PRIMARY KEY,
+        nome TEXT NOT NULL,
+        email TEXT UNIQUE NOT NULL,
+        funcao TEXT,
+        organizacao TEXT,
+        senha_hash TEXT NOT NULL,
+        ativo TEXT NOT NULL,
+        data_criacao TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        is_admin INTEGER DEFAULT 0
+    );
+    """)
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS midia_uploads (
+        caminho TEXT PRIMARY KEY,
+        conteudo_b64 TEXT NOT NULL,
+        criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    """)
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS tipos_fundacao (
+        id INTEGER PRIMARY KEY,
+        nome TEXT UNIQUE NOT NULL,
+        descricao TEXT,
+        caracteristicas TEXT,
+        referencia_tecnica TEXT
+    );
+    """)
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS categorias_anomalias (
+        id INTEGER PRIMARY KEY,
+        nome TEXT UNIQUE NOT NULL,
+        descricao TEXT
+    );
+    """)
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS tipos_barragem (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        usuario_id INTEGER NOT NULL,
+        nome TEXT NOT NULL,
+        descricao TEXT,
+        referencia_tecnica TEXT,
+        image_path TEXT
+    );
+    """)
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS tipos_materiais (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        usuario_id INTEGER NOT NULL,
+        nome TEXT NOT NULL,
+        descricao TEXT
+    );
+    """)
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS tipos_zonas_bar (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        nome TEXT NOT NULL,
+        descricao TEXT
+    );
+    """)
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS tipo_modo_falha (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        usuario_id INTEGER NOT NULL,
+        nome TEXT NOT NULL,
+        descricao TEXT,
+        referencia_tecnica TEXT
+    );
+    """)
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS tipo_anomalia (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        usuario_id INTEGER NOT NULL,
+        nome TEXT NOT NULL,
+        descricao TEXT,
+        image_path TEXT
+    );
+    """)
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS barragens (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        usuario_id INTEGER NOT NULL,
+        nome TEXT NOT NULL,
+        tipo_id INTEGER NOT NULL,
+        localizacao TEXT,
+        altura REAL,
+        comprimento REAL,
+        rel_cordaaltura REAL,
+        em_analise INTEGER DEFAULT 0,
+        data_criacao TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (tipo_id) REFERENCES tipos_barragem(id)
+    );
+    """)
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS usuario_barragem_analise (
+        usuario_id INTEGER NOT NULL,
+        barragem_id INTEGER NOT NULL,
+        data_selecao TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (barragem_id) REFERENCES barragens(id),
+        PRIMARY KEY (usuario_id)
+    );
+    """)
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS modos_falha (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        usuario_id INTEGER NOT NULL,
+        id_tipo_modo_falha INTEGER NOT NULL,
+        nome TEXT NOT NULL,
+        descricao TEXT,
+        referencia_tecnica TEXT,
+        image_path TEXT,
+        FOREIGN KEY (id_tipo_modo_falha) REFERENCES tipo_modo_falha(id)
+    );
+    """)
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS modos_falha_tipo_barragem (
+        modos_falha_id INTEGER NOT NULL,
+        tipo_barragem_id INTEGER NOT NULL,
+        FOREIGN KEY (modos_falha_id) REFERENCES modos_falha(id) ON DELETE CASCADE,
+        FOREIGN KEY (tipo_barragem_id) REFERENCES tipos_barragem(id) ON DELETE CASCADE,
+        PRIMARY KEY (modos_falha_id, tipo_barragem_id)
+    );
+    """)
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS anomalias (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        modos_falha_id INTEGER NOT NULL,
+        usuario_id INTEGER NOT NULL,
+        tipo_anomalia_id INTEGER NOT NULL,
+        gravidade REAL,
+        peso REAL,
+        image_path TEXT,
+        FOREIGN KEY (modos_falha_id) REFERENCES modos_falha(id),
+        FOREIGN KEY (tipo_anomalia_id) REFERENCES tipo_anomalia(id)
+    );
+    """)
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS anomalia_zona (
+        anomalia_id INTEGER NOT NULL,
+        zona_id INTEGER NOT NULL,
+        FOREIGN KEY (anomalia_id) REFERENCES anomalias(id) ON DELETE CASCADE,
+        PRIMARY KEY (anomalia_id, zona_id)
+    );
+    """)
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS anomalia_tipo_material (
+        anomalia_id INTEGER NOT NULL,
+        tipo_mat_id INTEGER NOT NULL,
+        FOREIGN KEY (anomalia_id) REFERENCES anomalias(id) ON DELETE CASCADE,
+        FOREIGN KEY (tipo_mat_id) REFERENCES tipos_materiais(id) ON DELETE CASCADE,
+        PRIMARY KEY (anomalia_id, tipo_mat_id)
+    );
+    """)
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS anomalias_observadas (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        barragem_id INTEGER NOT NULL,
+        tipo_anomalia_id INTEGER NOT NULL,
+        tipos_zonas_bar_id INTEGER NOT NULL,
+        tipos_materiais_id INTEGER NOT NULL,
+        descricao TEXT,
+        image_path TEXT,
+        fonte_inspecao_visual BOOLEAN DEFAULT 0,
+        fonte_instrumentacao BOOLEAN DEFAULT 0,
+        fonte_drones BOOLEAN DEFAULT 0,
+        fonte_insar BOOLEAN DEFAULT 0,
+        fonte_satellite BOOLEAN DEFAULT 0,
+        data_observacao DATE
+    );
+    """)
+
+
 def inicializar_bd():
     with closing(conectar_db()) as conn:
         cursor = conn.cursor()
 
-        # Usuários (alinhado ao schema real de inSID.db)
-        cursor.execute("""
-        CREATE TABLE IF NOT EXISTS usuarios (
-            codigo TEXT PRIMARY KEY,
-            nome TEXT NOT NULL,
-            email TEXT UNIQUE NOT NULL,
-            funcao TEXT,
-            organizacao TEXT,
-            senha_hash TEXT NOT NULL,
-            ativo TEXT NOT NULL,
-            data_criacao TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            is_admin INTEGER DEFAULT 0
-        );
-        """)
+        # No Turso, se a primeira migração ainda não concluiu (modos_falha vazio),
+        # limpa tabelas antigas com FK inválida (REFERENCES usuarios(id)) antes de recriar e migrar.
+        if isinstance(conn, TursoConnection):
+            mf_existe = cursor.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='modos_falha'"
+            ).fetchone()
+            mf_tem_dados = False
+            if mf_existe:
+                mf_tem_dados = cursor.execute("SELECT 1 FROM modos_falha LIMIT 1").fetchone() is not None
+            if not mf_tem_dados:
+                for t in [
+                    "anomalias_observadas", "anomalia_tipo_material", "anomalia_zona",
+                    "anomalias", "modos_falha_tipo_barragem", "modos_falha",
+                    "usuario_barragem_analise", "barragens", "tipo_anomalia",
+                    "tipo_modo_falha", "tipos_zonas_bar", "tipos_materiais",
+                    "tipos_barragem", "categorias_anomalias", "tipos_fundacao", "usuarios"
+                ]:
+                    cursor.execute(f'DROP TABLE IF EXISTS "{t}"')
 
-        # Tabela de persistência de imagens enviadas pelos utilizadores (evita perda em disco efémero)
-        cursor.execute("""
-        CREATE TABLE IF NOT EXISTS midia_uploads (
-            caminho TEXT PRIMARY KEY,
-            conteudo_b64 TEXT NOT NULL,
-            criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-        """)
+        _criar_tabelas_schema(cursor)
 
-        # Tipos de Fundação
-        cursor.execute("""
-        CREATE TABLE IF NOT EXISTS tipos_fundacao (
-            id INTEGER PRIMARY KEY,
-            nome TEXT UNIQUE NOT NULL,
-            descricao TEXT,
-            caracteristicas TEXT,
-            referencia_tecnica TEXT
-        );
-        """)
+        # Se estiver ligado ao Turso pela primeira vez, importa os dados iniciais de inSID.db
+        _migrar_seed_local_para_turso_se_vazio(conn)
 
-        # Categorias de Anomalias
-        cursor.execute("""
-        CREATE TABLE IF NOT EXISTS categorias_anomalias (
-            id INTEGER PRIMARY KEY,
-            nome TEXT UNIQUE NOT NULL,
-            descricao TEXT
-        );
-        """)
-
-        # Tipos de Barragem
-        cursor.execute("""
-        CREATE TABLE IF NOT EXISTS tipos_barragem (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            usuario_id INTEGER NOT NULL,
-            nome TEXT NOT NULL,
-            descricao TEXT,
-            referencia_tecnica TEXT,
-            image_path TEXT
-        );
-        """)
-
-        # Insere tipos de barragem padrão
+        # Fallbacks mínimos caso não exista inSID.db seed
         if not cursor.execute("SELECT 1 FROM tipos_barragem LIMIT 1").fetchone():
             cursor.executemany("""
                 INSERT INTO tipos_barragem (usuario_id, nome, descricao)
@@ -166,58 +325,6 @@ def inicializar_bd():
                 (1, "Enrocamento com Núcleo Betuminoso", "Barragem de enrocamento com núcleo impermeável de betume")
             ])
 
-        # Tipos de Materiais
-        cursor.execute("""
-        CREATE TABLE IF NOT EXISTS tipos_materiais (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            usuario_id INTEGER NOT NULL,
-            nome TEXT NOT NULL,
-            descricao TEXT
-        );
-        """)
-
-        # Barragens
-        cursor.execute("""
-        CREATE TABLE IF NOT EXISTS barragens (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            usuario_id INTEGER NOT NULL,
-            nome TEXT NOT NULL,
-            tipo_id INTEGER NOT NULL,
-            localizacao TEXT,
-            altura REAL,
-            comprimento REAL,
-            rel_cordaaltura REAL,
-            em_analise INTEGER DEFAULT 0,
-            data_criacao TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (usuario_id) REFERENCES usuarios(id),
-            FOREIGN KEY (tipo_id) REFERENCES tipos_barragem(id)
-        );
-        """)
-
-
-        cursor.execute("""
-        CREATE TABLE IF NOT EXISTS usuario_barragem_analise (
-            usuario_id INTEGER NOT NULL,
-            barragem_id INTEGER NOT NULL,
-            data_selecao TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (usuario_id) REFERENCES usuarios(id),
-            FOREIGN KEY (barragem_id) REFERENCES barragens(id),
-            PRIMARY KEY (usuario_id)
-        );
-        """)
-
-        # Tipo Modo de Falha
-        cursor.execute("""
-        CREATE TABLE IF NOT EXISTS tipo_modo_falha (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            usuario_id INTEGER NOT NULL,
-            nome TEXT NOT NULL,
-            descricao TEXT,
-            referencia_tecnica TEXT
-        );
-        """)
-
-        # Insere tipos de modo de falha padrão
         if not cursor.execute("SELECT 1 FROM tipo_modo_falha LIMIT 1").fetchone():
             cursor.executemany("""
                 INSERT INTO tipo_modo_falha (usuario_id, nome, descricao, referencia_tecnica)
@@ -228,118 +335,6 @@ def inicializar_bd():
                 (1, 'Roturas Hidráulicas', 'Falhas devido a níveis de água...', '*')
             ])
 
-        # Modos de Falha
-        cursor.execute("""
-        CREATE TABLE IF NOT EXISTS modos_falha (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            usuario_id INTEGER NOT NULL,
-            id_tipo_modo_falha INTEGER NOT NULL,
-            nome TEXT NOT NULL,
-            descricao TEXT,
-            referencia_tecnica TEXT,
-            image_path TEXT,
-            FOREIGN KEY (id_tipo_modo_falha) REFERENCES tipo_modo_falha(id)
-        );
-        """)
-
-        # Modos de Falha x Tipos de Barragem
-        cursor.execute("""
-        CREATE TABLE IF NOT EXISTS modos_falha_tipo_barragem (
-            modos_falha_id INTEGER NOT NULL,
-            tipo_barragem_id INTEGER NOT NULL,
-            FOREIGN KEY (modos_falha_id) REFERENCES modos_falha(id) ON DELETE CASCADE,
-            FOREIGN KEY (tipo_barragem_id) REFERENCES tipos_barragem(id) ON DELETE CASCADE,
-            PRIMARY KEY (modos_falha_id, tipo_barragem_id)
-        );
-        """)
-
-        # Anomalias 
-        cursor.execute("""
-        CREATE TABLE IF NOT EXISTS anomalias (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            modos_falha_id INTEGER NOT NULL,           
-            usuario_id INTEGER NOT NULL,            
-            tipo_anomalia_id INTEGER NOT NULL,         
-            gravidade REAL,
-            peso REAL,
-            image_path TEXT,
-            FOREIGN KEY (modos_falha_id) REFERENCES modos_falha(id),
-            FOREIGN KEY (usuario_id) REFERENCES usuarios(id),
-            FOREIGN KEY (tipo_anomalia_id) REFERENCES tipo_anomalia(id)
-        );
-        """)
-
-        # Tipo de Anomalia
-        cursor.execute("""
-        CREATE TABLE IF NOT EXISTS tipo_anomalia (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            usuario_id INTEGER NOT NULL,
-            nome TEXT NOT NULL,
-            descricao TEXT,
-            image_path TEXT
-        );
-        """)
-
-        # Relaciona Anomalia com Zona
-        cursor.execute("""
-        CREATE TABLE IF NOT EXISTS anomalia_zona (
-            anomalia_id INTEGER NOT NULL,
-            zona_id INTEGER NOT NULL,
-            FOREIGN KEY (anomalia_id) REFERENCES anomalias(id) ON DELETE CASCADE,
-            PRIMARY KEY (anomalia_id, zona_id)
-        );
-        """)
-
-        # Relaciona Anomalia com Tipo de Material
-        cursor.execute("""
-        CREATE TABLE IF NOT EXISTS anomalia_tipo_material (
-            anomalia_id INTEGER NOT NULL,
-            tipo_mat_id INTEGER NOT NULL,
-            FOREIGN KEY (anomalia_id) REFERENCES anomalias(id) ON DELETE CASCADE,
-            FOREIGN KEY (tipo_mat_id) REFERENCES tipos_materiais(id) ON DELETE CASCADE,
-            PRIMARY KEY (anomalia_id, tipo_mat_id)
-        );
-        """)
-
-        cursor.execute("""
-        CREATE TABLE IF NOT EXISTS tipos_zonas_bar (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            nome TEXT NOT NULL,
-            descricao TEXT
-        );
-        """)        
-
-        # Registo de anomalias_observadas pelo usuário
-        cursor.execute("""
-        CREATE TABLE IF NOT EXISTS anomalias_observadas (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, 
-            barragem_id INTEGER NOT NULL,                      
-            tipo_anomalia_id INTEGER NOT NULL,         
-            tipos_zonas_bar_id INTEGER NOT NULL,  
-            tipos_materiais_id INTEGER NOT NULL,  
-            descricao TEXT,
-            image_path TEXT,
-
-            fonte_inspecao_visual BOOLEAN DEFAULT 0,
-            fonte_instrumentacao BOOLEAN DEFAULT 0,
-            fonte_drones BOOLEAN DEFAULT 0,
-            fonte_insar BOOLEAN DEFAULT 0,
-            fonte_satellite BOOLEAN DEFAULT 0,
-
-            data_observacao DATE,
-
-
-            FOREIGN KEY (barragem_id) REFERENCES barragens(id),
-            FOREIGN KEY (tipo_anomalia_id) REFERENCES tipo_anomalia(id),
-            FOREIGN KEY (tipos_zonas_bar_id) REFERENCES tipos_zonas_bar(id),
-            FOREIGN KEY (tipos_materiais_id) REFERENCES tipos_materiais(id)
-        );
-        """)
-
-        # Se estiver ligado ao Turso pela primeira vez, importa os dados iniciais de inSID.db
-        _migrar_seed_local_para_turso_se_vazio(conn)
-
-        # Garante um utilizador administrador inicial apenas se a BD continuar sem utilizadores
         if not cursor.execute("SELECT 1 FROM usuarios LIMIT 1").fetchone():
             senha_inicial = os.environ.get("INSID_ADMIN_PASSWORD", "admin123")
             cursor.execute(
