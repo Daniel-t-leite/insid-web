@@ -2951,52 +2951,63 @@ def identificar_modo_falha_provavel(barragem_id):
                     WHERE ao.barragem_id = {barragem_id}
                 """, conn)
                 
-                # Estrutura para resultados
+                # Estrutura para resultados (inclui TODOS os modos de falha cadastrados para o tipo de barragem)
                 resultados = []
-                
-                # 3. Para cada modo de falha, calcular o score
+
+                # Pré-carregar regras de anomalias, materiais e zonas em lote (evita N+1 queries no Turso)
+                mf_ids = [int(x) for x in modos_falha['id'].tolist()]
+                placeholders_mf = ",".join("?" for _ in mf_ids)
+                todas_anomalias_sistema = pd.read_sql(
+                    f"""
+                    SELECT a.id, a.modos_falha_id, a.tipo_anomalia_id, a.peso, ta.nome as nome_anomalia
+                    FROM anomalias a
+                    JOIN tipo_anomalia ta ON a.tipo_anomalia_id = ta.id
+                    WHERE a.modos_falha_id IN ({placeholders_mf})
+                    """,
+                    conn,
+                    params=mf_ids,
+                )
+
+                materiais_por_anomalia = {}
+                zonas_por_anomalia = {}
+                if not todas_anomalias_sistema.empty:
+                    anom_ids = [int(x) for x in todas_anomalias_sistema['id'].tolist()]
+                    placeholders_a = ",".join("?" for _ in anom_ids)
+                    df_am = pd.read_sql(
+                        f"SELECT anomalia_id, tipo_mat_id FROM anomalia_tipo_material WHERE anomalia_id IN ({placeholders_a})",
+                        conn,
+                        params=anom_ids,
+                    )
+                    for a_id, mat_id in df_am.itertuples(index=False):
+                        materiais_por_anomalia.setdefault(int(a_id), set()).add(int(mat_id))
+
+                    df_az = pd.read_sql(
+                        f"SELECT anomalia_id, zona_id FROM anomalia_zona WHERE anomalia_id IN ({placeholders_a})",
+                        conn,
+                        params=anom_ids,
+                    )
+                    for a_id, z_id in df_az.itertuples(index=False):
+                        zonas_por_anomalia.setdefault(int(a_id), set()).add(int(z_id))
+
+                # 3. Para cada modo de falha cadastrado para este tipo de barragem, calcular o score
                 for _, mf in modos_falha.iterrows():
                     score_total = 0.0
                     anomalias_contribuintes = []
-                    
-                    # Obter todas as anomalias do sistema para este modo de falha
-                    anomalias_sistema = pd.read_sql(f"""
-                        SELECT 
-                            a.id,
-                            a.tipo_anomalia_id,
-                            a.peso,
-                            ta.nome as nome_anomalia
-                        FROM anomalias a
-                        JOIN tipo_anomalia ta ON a.tipo_anomalia_id = ta.id
-                        WHERE a.modos_falha_id = {mf['id']}
-                    """, conn)
-                    
+                    mf_id_int = int(mf['id'])
+                    anomalias_sistema = todas_anomalias_sistema[todas_anomalias_sistema['modos_falha_id'] == mf_id_int]
+
                     # Para cada anomalia observada, verificar correspondência
                     for _, obs in anomalias_obs.iterrows():
-                        # Verificar se há correspondência com anomalias do sistema
                         for _, anom in anomalias_sistema.iterrows():
                             if anom['tipo_anomalia_id'] == obs['tipo_anomalia_id']:
-                                # Verificar material (anomalia_tipo_material)
-                                material_match = pd.read_sql(f"""
-                                    SELECT 1 FROM anomalia_tipo_material 
-                                    WHERE anomalia_id = {anom['id']} 
-                                    AND tipo_mat_id = {obs['material_id']}
-                                    LIMIT 1
-                                """, conn).shape[0] > 0
-                                
-                                # Verificar zona (anomalia_zona)
-                                zona_match = pd.read_sql(f"""
-                                    SELECT 1 FROM anomalia_zona 
-                                    WHERE anomalia_id = {anom['id']} 
-                                    AND zona_id = {obs['zona_id']}
-                                    LIMIT 1
-                                """, conn).shape[0] > 0
-                                
-                                # Se atender aos critérios, calcular contribuição
+                                anom_id_int = int(anom['id'])
+                                material_match = int(obs['material_id']) in materiais_por_anomalia.get(anom_id_int, set())
+                                zona_match = int(obs['zona_id']) in zonas_por_anomalia.get(anom_id_int, set())
+
                                 if material_match and zona_match:
-                                    contribuicao = anom['peso'] * (1 + 0.5*material_match + 0.5*zona_match)
+                                    contribuicao = anom['peso'] * (1 + 0.5 * material_match + 0.5 * zona_match)
                                     score_total += contribuicao
-                                    
+
                                     anomalias_contribuintes.append({
                                         'anomalia_obs_id': obs['id'],
                                         'anomalia_obs_nome': obs['anomalia_nome'],
@@ -3007,60 +3018,57 @@ def identificar_modo_falha_provavel(barragem_id):
                                         'peso': anom['peso'],
                                         'contribuicao': contribuicao
                                     })
-                    
-                    if score_total > 0:
-                        resultados.append({
-                            'modo_falha_id': mf['id'],
-                            'modo_falha_nome': mf['nome'],
-                            'modo_falha_descricao': mf['descricao'],
-                            'modo_falha_imagem': mf['image_path'],
-                            'score_total': score_total,
-                            'anomalias_contribuintes': anomalias_contribuintes
-                        })
-                
-                if not resultados:
-                    st.warning("⚠️ Nenhum modo de falha atendeu a todos os critérios de análise")
-                    return
-                
-                # Ordenar por score
-                resultados.sort(key=lambda x: x['score_total'], reverse=True)
-                
-                # Normalizar scores para porcentagem
+
+                    resultados.append({
+                        'modo_falha_id': mf['id'],
+                        'modo_falha_nome': mf['nome'],
+                        'modo_falha_descricao': mf['descricao'],
+                        'modo_falha_imagem': mf['image_path'],
+                        'score_total': score_total,
+                        'anomalias_contribuintes': anomalias_contribuintes
+                    })
+
+                # Ordenar por score (desc) e nome (asc)
+                resultados.sort(key=lambda x: (-x['score_total'], str(x['modo_falha_nome'])))
+
+                # Normalizar scores para percentagem
                 total_score = sum(r['score_total'] for r in resultados)
                 for r in resultados:
-                    r['probabilidade'] = (r['score_total'] / total_score) * 100
-                
+                    r['probabilidade'] = (r['score_total'] / total_score) * 100 if total_score > 0 else 0.0
+
                 # Exibir resultados
-                st.success("🎯 Resultados da Análise")
-                
-                # Gráfico de probabilidades
+                if total_score > 0:
+                    st.success(f"🎯 Resultados da Análise ({len(resultados)} modos de falha avaliados para este tipo de barragem)")
+                else:
+                    st.warning(f"⚠️ Nenhum dos {len(resultados)} modos de falha cadastrados atingiu correspondência completa (tipo + zona + material) com as anomalias observadas.")
+
+                # Gráfico de probabilidades (todos os modos de falha cadastrados para o tipo de barragem)
                 df_plot = pd.DataFrame({
                     'Modo de Falha': [r['modo_falha_nome'] for r in resultados],
                     'Probabilidade (%)': [r['probabilidade'] for r in resultados]
                 })
-                
+
                 fig = px.bar(
                     df_plot,
                     x='Modo de Falha',
                     y='Probabilidade (%)',
                     color='Modo de Falha',
                     text='Probabilidade (%)',
-                    title='Probabilidade por Modo de Falha',
+                    title=f"Probabilidade por Modo de Falha — Todos os {len(resultados)} modos cadastrados ({tipo_barragem['tipo_nome']})",
                     labels={'Probabilidade (%)': 'Probabilidade (%)'}
                 )
                 fig.update_traces(texttemplate='%{text:.1f}%', textposition='outside')
+                fig.update_layout(showlegend=False, xaxis_tickangle=-35)
                 st.plotly_chart(fig, use_container_width=True)
-                
+
                 # Tabela detalhada com imagens e descrições
-                st.subheader("📊 Detalhes da Análise")
-                
+                st.subheader(f"📊 Detalhes da Análise ({len(resultados)} Modos de Falha)")
+
                 for res in resultados:
                     with st.expander(f"{res['modo_falha_nome']} ({res['probabilidade']:.1f}%)"):
-                        # Criar colunas para imagem e descrição
                         col1, col2 = st.columns([1, 2])
-                        
+
                         with col1:
-                            # Exibir imagem se existir
                             img_res = resolver_caminho_arquivo(res['modo_falha_imagem'])
                             if img_res:
                                 try:
@@ -3073,30 +3081,33 @@ def identificar_modo_falha_provavel(barragem_id):
                                     st.warning("Não foi possível apresentar a imagem deste modo de falha.")
                             else:
                                 st.warning("Sem imagem disponível")
-                        
+
                         with col2:
-                            st.write(f"**Descrição:**")
+                            st.write("**Descrição:**")
                             st.write(res['modo_falha_descricao'] or "Sem descrição disponível")
-                        
+
                         st.write(f"**Score Total:** {res['score_total']:.2f}")
-                        
-                        df_contrib = pd.DataFrame(res['anomalias_contribuintes'])
-                        st.dataframe(
-                            df_contrib[['anomalia_obs_nome', 'anomalia_sistema_nome', 
-                                      'material', 'zona', 'peso', 'contribuicao']],
-                            column_config={
-                                'contribuicao': st.column_config.NumberColumn(
-                                    'Contribuição',
-                                    format="%.2f"
-                                ),
-                                'peso': st.column_config.NumberColumn(
-                                    'Peso Original',
-                                    format="%.2f"
-                                )
-                            },
-                            hide_index=True,
-                            use_container_width=True
-                        )
+
+                        if res['anomalias_contribuintes']:
+                            df_contrib = pd.DataFrame(res['anomalias_contribuintes'])
+                            st.dataframe(
+                                df_contrib[['anomalia_obs_nome', 'anomalia_sistema_nome',
+                                          'material', 'zona', 'peso', 'contribuicao']],
+                                column_config={
+                                    'contribuicao': st.column_config.NumberColumn(
+                                        'Contribuição',
+                                        format="%.2f"
+                                    ),
+                                    'peso': st.column_config.NumberColumn(
+                                        'Peso Original',
+                                        format="%.2f"
+                                    )
+                                },
+                                hide_index=True,
+                                use_container_width=True
+                            )
+                        else:
+                            st.info("Sem anomalias observadas compatíveis com todos os critérios (tipo + zona + material) deste modo de falha.")
     
     except Exception as e:
         st.error(f"⛔ Erro durante a análise: {str(e)}")
