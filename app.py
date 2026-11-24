@@ -97,6 +97,10 @@ from rbac import (
     submeter_alteracao_configuracao, contar_propostas_pendentes,
     listar_propostas_configuracao, aprovar_proposta_configuracao, rejeitar_proposta_configuracao,
 )
+import importlib
+import i18n as _i18n_mod
+if not hasattr(_i18n_mod, "translate_term"):
+    _i18n_mod = importlib.reload(_i18n_mod)
 from i18n import get_text, translate_term, SUPPORTED_LANGS
 from theme_desproj import aplicar_tema_desproj
 
