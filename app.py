@@ -2358,7 +2358,7 @@ def pagina_admin_usuarios():
         opcoes_role = [ROLE_SUPER_ADMIN, ROLE_APPROVER, ROLE_USER]
         for _, usuario in usuarios.iterrows():
             col1, col2, col3, col4 = st.columns([3, 2, 3, 2])
-            role_u = normalizar_role(usuario.get('role'), usuario.get('is_admin', 0))
+            role_u = normalize_role(usuario.get('role'), usuario.get('is_admin', 0))
 
             with col1:
                 st.write(f"**{usuario['nome']}** · `{usuario['codigo']}`")
@@ -2442,7 +2442,7 @@ def pagina_login():
                 resultado = verificar_credenciais(email, senha)
                 if resultado:
                     usuario_id, nome, is_admin, role = resultado
-                    role_norm = normalizar_role(role, is_admin)
+                    role_norm = normalize_role(role, is_admin)
                     st.session_state.update({
                         'logado': True,
                         'email': email,
