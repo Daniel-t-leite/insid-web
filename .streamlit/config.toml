@@ -8,3 +8,10 @@ showErrorDetails = false
 
 [browser]
 gatherUsageStats = false
+
+[theme]
+primaryColor = "#b8520e"
+backgroundColor = "#faf8f5"
+secondaryBackgroundColor = "#f3eee8"
+textColor = "#231a14"
+font = "sans serif"

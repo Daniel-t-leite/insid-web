@@ -106,7 +106,25 @@ def _criar_tabelas_schema(cursor) -> None:
         senha_hash TEXT NOT NULL,
         ativo TEXT NOT NULL,
         data_criacao TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        is_admin INTEGER DEFAULT 0
+        is_admin INTEGER DEFAULT 0,
+        role TEXT NOT NULL DEFAULT 'user'
+    );
+    """)
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS config_change_requests (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        entity_type TEXT NOT NULL,
+        action TEXT NOT NULL,
+        target_id INTEGER,
+        payload_json TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        proposed_by TEXT NOT NULL,
+        proposed_by_name TEXT,
+        reviewed_by TEXT,
+        review_note TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        reviewed_at TIMESTAMP
     );
     """)
 
@@ -188,6 +206,7 @@ def _criar_tabelas_schema(cursor) -> None:
     CREATE TABLE IF NOT EXISTS barragens (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         usuario_id INTEGER NOT NULL,
+        owner_id TEXT,
         nome TEXT NOT NULL,
         tipo_id INTEGER NOT NULL,
         localizacao TEXT,
@@ -336,14 +355,52 @@ def inicializar_bd():
             ])
 
         if not cursor.execute("SELECT 1 FROM usuarios LIMIT 1").fetchone():
+            super_email = os.environ.get("INSID_SUPER_ADMIN_EMAIL", "admin@insid.com").strip()
             senha_inicial = os.environ.get("INSID_ADMIN_PASSWORD", "admin123")
             cursor.execute(
-                """INSERT INTO usuarios (codigo, nome, email, funcao, organizacao, senha_hash, ativo, is_admin)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                ("1", "Administrador", "admin@insid.com", "Administrador", "inSID", hash_senha(senha_inicial), "sim", 1)
+                """INSERT INTO usuarios (codigo, nome, email, funcao, organizacao, senha_hash, ativo, is_admin, role)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                ("1", "Administrador", super_email, "Administrador", "inSID", hash_senha(senha_inicial), "sim", 1, "super_admin")
             )
 
+        _garantir_migracoes_rbac(cursor)
         conn.commit()
+
+
+def _coluna_existe(cursor, tabela: str, coluna: str) -> bool:
+    rows = cursor.execute(f'PRAGMA table_info("{tabela}")').fetchall()
+    return any(r[1] == coluna for r in rows)
+
+
+def _garantir_migracoes_rbac(cursor) -> None:
+    """Migração idempotente para RBAC (usuarios.role) e isolamento de análises (barragens.owner_id)."""
+    if not _coluna_existe(cursor, "usuarios", "role"):
+        cursor.execute("ALTER TABLE usuarios ADD COLUMN role TEXT NOT NULL DEFAULT 'user'")
+
+    # Promove administradores legados ou email configurado em INSID_SUPER_ADMIN_EMAIL para super_admin
+    super_email = os.environ.get("INSID_SUPER_ADMIN_EMAIL", "admin@insid.com").strip()
+    cursor.execute(
+        "UPDATE usuarios SET role = 'super_admin', is_admin = 1 WHERE LOWER(email) = LOWER(?)",
+        (super_email,),
+    )
+    cursor.execute(
+        "UPDATE usuarios SET role = 'super_admin' WHERE is_admin = 1 AND (role IS NULL OR role = '' OR role = 'user')"
+    )
+    cursor.execute(
+        "UPDATE usuarios SET role = 'user' WHERE role IS NULL OR role NOT IN ('super_admin', 'approver', 'user')"
+    )
+
+    if not _coluna_existe(cursor, "barragens", "owner_id"):
+        cursor.execute("ALTER TABLE barragens ADD COLUMN owner_id TEXT")
+    cursor.execute(
+        "UPDATE barragens SET owner_id = CAST(usuario_id AS TEXT) WHERE owner_id IS NULL OR owner_id = ''"
+    )
+
+    # Índices de performance para queries frequentes em SQLite / Turso
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_barragens_owner ON barragens(owner_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_anomalias_obs_barragem ON anomalias_observadas(barragem_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_anomalias_mf ON anomalias(modos_falha_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_config_req_status ON config_change_requests(status, proposed_by)")
 
 
 # ---------- Persistência de Imagens em Base de Dados ----------
@@ -390,14 +447,17 @@ def remover_midia_db(caminho: str) -> None:
 
 
 # ---------- Operações de Usuário ----------
-def criar_usuario(codigo, nome, email, funcao, organizacao, senha, ativo):
-    """Cadastra um novo usuário no sistema"""
+def criar_usuario(codigo, nome, email, funcao, organizacao, senha, ativo, role="user"):
+    """Cadastra um novo usuário no sistema com perfil RBAC"""
+    role_val = role if role in ("super_admin", "approver", "user") else "user"
+    is_admin_val = 1 if role_val == "super_admin" else 0
     with closing(conectar_db()) as conn:
         cursor = conn.cursor()
         try:
             cursor.execute(
-                "INSERT INTO usuarios (codigo, nome, email, funcao, organizacao, senha_hash, ativo) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (codigo, nome, email, funcao, organizacao, hash_senha(senha), ativo)
+                """INSERT INTO usuarios (codigo, nome, email, funcao, organizacao, senha_hash, ativo, is_admin, role)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (codigo, nome, email, funcao, organizacao, hash_senha(senha), ativo, is_admin_val, role_val)
             )
             conn.commit()
             return True
@@ -405,11 +465,12 @@ def criar_usuario(codigo, nome, email, funcao, organizacao, senha, ativo):
             return False
 
 def verificar_credenciais(email, senha):
-    """Verifica se as credenciais são válidas"""
+    """Verifica se as credenciais são válidas e retorna (codigo, nome, is_admin, role)"""
     with closing(conectar_db()) as conn:
         cursor = conn.cursor()
         cursor.execute("""
-        SELECT codigo, nome, is_admin FROM usuarios 
+        SELECT codigo, nome, is_admin, COALESCE(NULLIF(role, ''), CASE WHEN is_admin = 1 THEN 'super_admin' ELSE 'user' END) as role
+        FROM usuarios 
         WHERE email = ? AND senha_hash = ? AND LOWER(ativo) = 'sim'
         """, (email, hash_senha(senha)))
         return cursor.fetchone()
@@ -431,11 +492,13 @@ def obter_proximo_codigo_usuario():
     
 # ---------- Operações de Administração de Usuários ----------
 def listar_usuarios():
-    """Lista todos os usuários cadastrados"""
+    """Lista todos os usuários cadastrados com respetivo perfil RBAC"""
     with closing(conectar_db()) as conn:
         query = """
         SELECT codigo, nome, email, funcao, organizacao, 
-               ativo, is_admin, strftime('%d/%m/%Y %H:%M', data_criacao) as data_criacao
+               ativo, is_admin,
+               COALESCE(NULLIF(role, ''), CASE WHEN is_admin = 1 THEN 'super_admin' ELSE 'user' END) as role,
+               strftime('%d/%m/%Y %H:%M', data_criacao) as data_criacao
         FROM usuarios
         ORDER BY nome
         """
@@ -452,16 +515,32 @@ def atualizar_status_usuario(codigo, ativo):
         conn.commit()
         return cursor.rowcount > 0
 
-def atualizar_admin_usuario(codigo, is_admin):
-    """Atualiza o status de administrador de um usuário"""
+def atualizar_role_usuario(codigo, novo_role):
+    """Atualiza o perfil RBAC (super_admin, approver, user), protegendo o último super_admin."""
+    if novo_role not in ("super_admin", "approver", "user"):
+        return False
     with closing(conectar_db()) as conn:
         cursor = conn.cursor()
+        atual = cursor.execute("SELECT role FROM usuarios WHERE codigo = ?", (str(codigo),)).fetchone()
+        if not atual:
+            return False
+        if atual[0] == "super_admin" and novo_role != "super_admin":
+            total_supers = cursor.execute(
+                "SELECT COUNT(*) FROM usuarios WHERE role = 'super_admin' AND LOWER(ativo) = 'sim'"
+            ).fetchone()[0]
+            if total_supers <= 1:
+                return False
+        is_admin_val = 1 if novo_role == "super_admin" else 0
         cursor.execute(
-            "UPDATE usuarios SET is_admin = ? WHERE codigo = ?",
-            (is_admin, codigo)
+            "UPDATE usuarios SET role = ?, is_admin = ? WHERE codigo = ?",
+            (novo_role, is_admin_val, str(codigo))
         )
         conn.commit()
         return cursor.rowcount > 0
+
+def atualizar_admin_usuario(codigo, is_admin):
+    """Compatibilidade legada: delega para atualizar_role_usuario"""
+    return atualizar_role_usuario(codigo, "super_admin" if is_admin else "user")
 
 def excluir_usuario(codigo):
     """Remove um usuário do sistema"""
@@ -488,14 +567,14 @@ def remover_tipo_barragem(tipo_id):
         return cursor.rowcount > 0
 
 def cadastrar_barragem(usuario_id, nome, tipo_id, localizacao, altura, comprimento, rel_cordaaltura):
-    """Insere uma nova barragem no banco de dados"""
+    """Insere uma nova barragem no banco de dados com owner_id explícito"""
     conn = conectar_db()
     cursor = conn.cursor()
     cursor.execute(
         """INSERT INTO barragens 
-        (usuario_id, nome, tipo_id, localizacao, altura, comprimento, rel_cordaaltura) 
-        VALUES (?, ?, ?, ?, ?, ?, ?)""",
-        (usuario_id, nome, tipo_id, localizacao, altura, comprimento, rel_cordaaltura)
+        (usuario_id, owner_id, nome, tipo_id, localizacao, altura, comprimento, rel_cordaaltura) 
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        (usuario_id, str(usuario_id), nome, tipo_id, localizacao, altura, comprimento, rel_cordaaltura)
     )
     conn.commit()
     conn.close()

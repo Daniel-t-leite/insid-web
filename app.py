@@ -86,21 +86,197 @@ from db import (
     atualizar_admin_usuario, excluir_usuario,
     salvar_midia_db, carregar_midia_db, remover_midia_db
 )
+from rbac import (
+    ROLE_SUPER_ADMIN, ROLE_APPROVER, ROLE_USER, VALID_ROLES,
+    ROLE_LABELS, ENTITY_LABELS, ACTION_LABELS,
+    normalize_role, can_manage_users, can_approve_configs,
+    can_apply_config_directly, can_access_dam_analyses, can_view_all_dam_analyses,
+    alterar_role_usuario_seguro, alterar_status_usuario_seguro, excluir_usuario_seguro,
+    listar_barragens_escopo, obter_barragem_autorizada, obter_barragem_analise_escopo,
+    definir_barragem_analise_escopo, atualizar_barragem_escopo, excluir_barragem_escopo,
+    submeter_alteracao_configuracao, contar_propostas_pendentes,
+    listar_propostas_configuracao, aprovar_proposta_configuracao, rejeitar_proposta_configuracao,
+)
+from i18n import get_text, SUPPORTED_LANGS
+from theme_desproj import aplicar_tema_desproj
 
-# Configuração da página
-st.set_page_config(page_title="Sistema inSID", page_icon="🔐", layout="wide")
+# Configuração da página e tema visual alinhado a https://www.desproj.com/
+st.set_page_config(page_title="Plataforma inSID — desproj", page_icon="🔐", layout="wide")
+aplicar_tema_desproj()
+
+
+def obter_idioma() -> str:
+    lang = st.session_state.get("lang", "pt")
+    return lang if lang in SUPPORTED_LANGS else "pt"
+
+
+def t(key: str, **kwargs) -> str:
+    return get_text(key, lang=obter_idioma(), **kwargs)
+
+
+def render_seletor_idioma(key_suffix: str = "sidebar") -> None:
+    atual = obter_idioma()
+    escolha = st.radio(
+        t("lang_label"),
+        options=["pt", "en"],
+        format_func=lambda c: "🇵🇹 Português" if c == "pt" else "🇬🇧 English",
+        index=0 if atual == "pt" else 1,
+        horizontal=True,
+        key=f"lang_selector_{key_suffix}",
+    )
+    if escolha != atual:
+        st.session_state["lang"] = escolha
+        st.rerun()
+
+
+def obter_perfil_atual() -> str:
+    return normalize_role(st.session_state.get("role"), st.session_state.get("is_admin"))
+
+
+def rotulo_perfil(role: str) -> str:
+    return t(f"role_{role}")
+
+
+def pagina_inicial_por_perfil(role: str) -> str:
+    return "fila_aprovacoes" if role == ROLE_APPROVER else "principal"
+
+
+def exibir_aviso_workflow_config() -> None:
+    role = obter_perfil_atual()
+    if role == ROLE_USER:
+        st.info(t("workflow_user_banner"))
+    elif can_approve_configs(role):
+        pend = contar_propostas_pendentes()
+        if pend > 0:
+            st.caption(t("workflow_pending_caption", count=pend))
+
+
+def executar_alteracao_config_ui(
+    entity_type: str,
+    action: str,
+    payload: dict,
+    target_id=None,
+    msg_sucesso: str = "Alteração aplicada com sucesso!",
+) -> bool:
+    role = obter_perfil_atual()
+    res = submeter_alteracao_configuracao(
+        role=role,
+        user_id=st.session_state.get("usuario_id", "1"),
+        user_name=st.session_state.get("usuario_nome", "Utilizador"),
+        entity_type=entity_type,
+        action=action,
+        payload=payload,
+        target_id=target_id,
+    )
+    if res["status"] == "pending":
+        st.info(t("workflow_submitted_pending", req_id=res["request_id"]))
+        return False
+    st.success(msg_sucesso)
+    return True
+
+
+def pagina_fila_aprovacoes():
+    """Fila de aprovação de alterações de configurações globais (Aprovador e Usuário Supremo)."""
+    role = obter_perfil_atual()
+    if not can_approve_configs(role):
+        st.error(t("approvals_denied"))
+        return
+
+    st.title(t("approvals_title"))
+    st.caption(t("approvals_caption"))
+
+    tab_pend, tab_aprov, tab_rej = st.tabs([
+        t("approvals_tab_pending"),
+        t("approvals_tab_approved"),
+        t("approvals_tab_rejected"),
+    ])
+
+    with tab_pend:
+        pendentes = listar_propostas_configuracao(role, st.session_state.get("usuario_id"), status_filter="pending")
+        if not pendentes:
+            st.success(t("approvals_empty_pending"))
+        else:
+            for prop in pendentes:
+                ent_label = t(f"entity_{prop['entity_type']}")
+                act_label = t(f"action_{prop['action']}")
+                titulo = f"#{prop['id']} · [{act_label}] {ent_label} — {prop['proposed_by_name']}"
+                with st.expander(titulo, expanded=True):
+                    st.write(f"**Data:** {prop['created_at']} | **ID:** {prop['target_id'] or 'Novo / New'}")
+                    st.json(prop["payload"])
+                    nota = st.text_input(t("approvals_review_note"), key=f"nota_rev_{prop['id']}")
+                    col_a, col_r = st.columns(2)
+                    with col_a:
+                        if st.button(t("approvals_btn_approve"), key=f"aprov_{prop['id']}", type="primary"):
+                            try:
+                                aprovar_proposta_configuracao(prop["id"], st.session_state["usuario_id"], role, nota)
+                                st.success(t("approvals_approved_ok", req_id=prop["id"]))
+                                st.rerun()
+                            except Exception as e:
+                                st.error(str(e))
+                    with col_r:
+                        if st.button(t("approvals_btn_reject"), key=f"rej_{prop['id']}"):
+                            try:
+                                rejeitar_proposta_configuracao(prop["id"], st.session_state["usuario_id"], role, nota)
+                                st.warning(t("approvals_rejected_ok", req_id=prop["id"]))
+                                st.rerun()
+                            except Exception as e:
+                                st.error(str(e))
+
+    with tab_aprov:
+        aprovadas = listar_propostas_configuracao(role, st.session_state.get("usuario_id"), status_filter="approved")
+        if not aprovadas:
+            st.info(t("approvals_empty_approved"))
+        else:
+            for prop in aprovadas:
+                ent_label = t(f"entity_{prop['entity_type']}")
+                act_label = t(f"action_{prop['action']}")
+                with st.expander(f"🟢 #{prop['id']} · [{act_label}] {ent_label} — {prop['proposed_by_name']}"):
+                    st.write(f"**Data:** {prop['reviewed_at']} | **Nota:** {prop['review_note'] or '—'}")
+                    st.json(prop["payload"])
+
+    with tab_rej:
+        rejeitadas = listar_propostas_configuracao(role, st.session_state.get("usuario_id"), status_filter="rejected")
+        if not rejeitadas:
+            st.info(t("approvals_empty_rejected"))
+        else:
+            for prop in rejeitadas:
+                ent_label = t(f"entity_{prop['entity_type']}")
+                act_label = t(f"action_{prop['action']}")
+                with st.expander(f"🔴 #{prop['id']} · [{act_label}] {ent_label} — {prop['proposed_by_name']}"):
+                    st.write(f"**Data:** {prop['reviewed_at']} | **Nota:** {prop['review_note'] or '—'}")
+                    st.json(prop["payload"])
+
+
+def pagina_minhas_propostas():
+    """Lista as propostas de alteração de configuração submetidas pelo utilizador atual."""
+    role = obter_perfil_atual()
+    st.title(t("my_proposals_title"))
+    st.caption(t("my_proposals_caption"))
+
+    propostas = listar_propostas_configuracao(role, st.session_state.get("usuario_id"))
+    if not propostas:
+        st.info(t("my_proposals_empty"))
+        return
+
+    badges = {
+        "pending": t("status_pending"),
+        "approved": t("status_approved"),
+        "rejected": t("status_rejected"),
+    }
+    for prop in propostas:
+        ent_label = t(f"entity_{prop['entity_type']}")
+        act_label = t(f"action_{prop['action']}")
+        st_badge = badges.get(prop["status"], prop["status"])
+        with st.expander(f"{st_badge} · #{prop['id']} [{act_label}] {ent_label} ({prop['created_at']})"):
+            if prop["review_note"]:
+                st.write(f"**Nota:** {prop['review_note']}")
+            st.json(prop["payload"])
+
 
 def gerenciar_tipos_anomalia():
     """Página de gerenciamento de tipos de anomalia"""
     st.title("📋 Gerenciamento de Tipos de Anomalia")
-
-    # Verifica permissão
-    if not st.session_state.get('is_admin'):
-        st.error("⛔ Acesso permitido apenas para administradores")
-        if st.button("← Voltar"):
-            st.session_state['pagina'] = "principal"
-            st.rerun()
-        return
+    exibir_aviso_workflow_config()
 
     # Conexão com o banco
     conn = conectar_db()
@@ -135,20 +311,15 @@ def gerenciar_tipos_anomalia():
                     st.error("O nome do tipo de anomalia é obrigatório")
                 else:
                     try:
-                        cursor = conn.cursor()
-                        cursor.execute("""
-                            INSERT INTO tipo_anomalia 
-                            (usuario_id, nome, descricao)
-                            VALUES (?, ?, ?)
-                        """, (
-                            st.session_state['usuario_id'],
-                            nome.strip(),
-                            descricao.strip() if descricao else None
-                        ))
-                        conn.commit()
-                        st.success("Tipo de anomalia cadastrado com sucesso!")
-                        st.session_state.ultima_atualizacao = time.time()
-                        st.rerun()
+                        aplicado = executar_alteracao_config_ui(
+                            "tipo_anomalia",
+                            "create",
+                            {"nome": nome.strip(), "descricao": descricao.strip() if descricao else None},
+                            msg_sucesso="Tipo de anomalia cadastrado com sucesso!",
+                        )
+                        if aplicado:
+                            st.session_state.ultima_atualizacao = time.time()
+                            st.rerun()
                     except sqlite3.IntegrityError:
                         st.error("Já existe um tipo de anomalia com este nome.")
                     except Exception as e:
@@ -188,21 +359,17 @@ def gerenciar_tipos_anomalia():
                             st.error("O nome do tipo de anomalia é obrigatório")
                         else:
                             try:
-                                cursor = conn.cursor()
-                                cursor.execute("""
-                                    UPDATE tipo_anomalia 
-                                    SET nome = ?, descricao = ?
-                                    WHERE id = ?
-                                """, (
-                                    novo_nome.strip(),
-                                    nova_descricao.strip() if nova_descricao else None,
-                                    tipo_id
-                                ))
-                                conn.commit()
-                                st.success("Tipo de anomalia atualizado com sucesso!")
-                                st.session_state.editando_tipo_anomalia = None
-                                st.session_state.ultima_atualizacao = time.time()
-                                st.rerun()
+                                aplicado = executar_alteracao_config_ui(
+                                    "tipo_anomalia",
+                                    "update",
+                                    {"nome": novo_nome.strip(), "descricao": nova_descricao.strip() if nova_descricao else None},
+                                    target_id=int(tipo_id),
+                                    msg_sucesso="Tipo de anomalia atualizado com sucesso!",
+                                )
+                                if aplicado:
+                                    st.session_state.editando_tipo_anomalia = None
+                                    st.session_state.ultima_atualizacao = time.time()
+                                    st.rerun()
                             except sqlite3.IntegrityError:
                                 st.error("Já existe outro tipo de anomalia com este nome.")
                             except Exception as e:
@@ -243,12 +410,16 @@ def gerenciar_tipos_anomalia():
             else:
                 if st.button("🗑️ Confirmar Exclusão", type="primary"):
                     try:
-                        cursor = conn.cursor()
-                        cursor.execute("DELETE FROM tipo_anomalia WHERE id = ?", (tipo_id,))
-                        conn.commit()
-                        st.success("Tipo de anomalia excluído com sucesso!")
-                        st.session_state.ultima_atualizacao = time.time()
-                        st.rerun()
+                        aplicado = executar_alteracao_config_ui(
+                            "tipo_anomalia",
+                            "delete",
+                            {"nome": tipo_anomalia['nome']},
+                            target_id=int(tipo_id),
+                            msg_sucesso="Tipo de anomalia excluído com sucesso!",
+                        )
+                        if aplicado:
+                            st.session_state.ultima_atualizacao = time.time()
+                            st.rerun()
                     except Exception as e:
                         st.error(f"Erro ao excluir: {str(e)}")
 
@@ -261,14 +432,7 @@ def gerenciar_tipos_anomalia():
 def gerenciar_modos_falha_anomalias():
     """Página de gerenciamento de modos de falha e anomalias com todos os relacionamentos"""
     st.title("⚙️ Gerenciamento de Modos de Falha e Anomalias")
-
-    # Verifica permissão
-    if not st.session_state.get('is_admin'):
-        st.error("⛔ Acesso permitido apenas para administradores")
-        if st.button("← Voltar"):
-            st.session_state['pagina'] = "principal"
-            st.rerun()
-        return
+    exibir_aviso_workflow_config()
 
     # Conexão com o banco
     conn = conectar_db()
@@ -351,20 +515,30 @@ def gerenciar_modos_falha_anomalias():
             if set(novos_tipos_barragem) != set(tipos_barragem_associados):
                 if st.button("💾 Salvar Alterações nos Tipos de Barragem"):
                     try:
-                        cursor = conn.cursor()
-                        cursor.execute("DELETE FROM modos_falha_tipo_barragem WHERE modos_falha_id = ?", 
-                                    (st.session_state.modo_falha_selecionado,))
-                        
-                        for tipo_barragem_id in novos_tipos_barragem:
-                            cursor.execute("""
-                                INSERT INTO modos_falha_tipo_barragem (modos_falha_id, tipo_barragem_id)
-                                VALUES (?, ?)
-                            """, (st.session_state.modo_falha_selecionado, tipo_barragem_id))
-                        
-                        conn.commit()
-                        st.success("Tipos de barragem atualizados com sucesso!")
-                        st.session_state.ultima_atualizacao = time.time()
-                        st.rerun()
+                        mf_info = pd.read_sql(
+                            "SELECT nome, id_tipo_modo_falha, descricao, referencia_tecnica, image_path FROM modos_falha WHERE id = ?",
+                            conn,
+                            params=(int(st.session_state.modo_falha_selecionado),),
+                        )
+                        if not mf_info.empty:
+                            row_mf = mf_info.iloc[0]
+                            aplicado = executar_alteracao_config_ui(
+                                "modos_falha",
+                                "update",
+                                {
+                                    "nome": row_mf["nome"],
+                                    "id_tipo_modo_falha": int(row_mf["id_tipo_modo_falha"]),
+                                    "descricao": row_mf["descricao"],
+                                    "referencia_tecnica": row_mf["referencia_tecnica"],
+                                    "image_path": row_mf["image_path"],
+                                    "tipos_barragem_ids": [int(x) for x in novos_tipos_barragem],
+                                },
+                                target_id=int(st.session_state.modo_falha_selecionado),
+                                msg_sucesso="Tipos de barragem atualizados com sucesso!",
+                            )
+                            if aplicado:
+                                st.session_state.ultima_atualizacao = time.time()
+                                st.rerun()
                     except Exception as e:
                         st.error(f"Erro ao atualizar tipos de barragem: {str(e)}")
             
@@ -397,17 +571,21 @@ def gerenciar_modos_falha_anomalias():
                     if anomalias_para_excluir:
                         if st.button(f"Confirmar Exclusão de {len(anomalias_para_excluir)} Anomalia(s)"):
                             try:
-                                cursor = conn.cursor()
+                                houve_aplicacao = False
                                 for anomalia_id in anomalias_para_excluir:
-                                    cursor.execute("DELETE FROM anomalia_zona WHERE anomalia_id = ?", (anomalia_id,))
-                                    cursor.execute("DELETE FROM anomalia_tipo_material WHERE anomalia_id = ?", (anomalia_id,))
-                                    cursor.execute("DELETE FROM anomalias WHERE id = ?", (anomalia_id,))
-                                
-                                conn.commit()
-                                st.success("Anomalias excluídas com sucesso!")
-                                st.session_state.anomalias_selecionadas = novas_anomalias_selecionadas
-                                st.session_state.ultima_atualizacao = time.time()
-                                st.rerun()
+                                    aplicado = executar_alteracao_config_ui(
+                                        "anomalias",
+                                        "delete",
+                                        {"id": int(anomalia_id)},
+                                        target_id=int(anomalia_id),
+                                        msg_sucesso="Anomalia excluída com sucesso!",
+                                    )
+                                    if aplicado:
+                                        houve_aplicacao = True
+                                if houve_aplicacao:
+                                    st.session_state.anomalias_selecionadas = novas_anomalias_selecionadas
+                                    st.session_state.ultima_atualizacao = time.time()
+                                    st.rerun()
                             except Exception as e:
                                 st.error(f"Erro ao excluir: {str(e)}")
                     else:
@@ -511,31 +689,22 @@ def gerenciar_modos_falha_anomalias():
                                 return
 
                         try:
-                            cursor = conn.cursor()
-                            cursor.execute("""
-                                INSERT INTO modos_falha 
-                                (usuario_id, id_tipo_modo_falha, nome, descricao, referencia_tecnica, image_path)
-                                VALUES (?, ?, ?, ?, ?, ?)
-                            """, (
-                                st.session_state['usuario_id'],
-                                id_tipo,
-                                nome.strip(),
-                                descricao.strip() if descricao else None,
-                                referencia.strip() if referencia else None,
-                                caminho_imagem
-                            ))
-                            modo_falha_id = cursor.lastrowid
-                            
-                            for tipo_barragem_id in tipos_barragem_selecionados:
-                                cursor.execute("""
-                                    INSERT INTO modos_falha_tipo_barragem (modos_falha_id, tipo_barragem_id)
-                                    VALUES (?, ?)
-                                """, (modo_falha_id, tipo_barragem_id))
-                            
-                            conn.commit()
-                            st.success("Modo de falha cadastrado com sucesso!")
-                            st.session_state.ultima_atualizacao = time.time()
-                            st.rerun()
+                            aplicado = executar_alteracao_config_ui(
+                                "modos_falha",
+                                "create",
+                                {
+                                    "id_tipo_modo_falha": int(id_tipo),
+                                    "nome": nome.strip(),
+                                    "descricao": descricao.strip() if descricao else None,
+                                    "referencia_tecnica": referencia.strip() if referencia else None,
+                                    "image_path": caminho_imagem,
+                                    "tipos_barragem_ids": [int(x) for x in tipos_barragem_selecionados],
+                                },
+                                msg_sucesso="Modo de falha cadastrado com sucesso!",
+                            )
+                            if aplicado:
+                                st.session_state.ultima_atualizacao = time.time()
+                                st.rerun()
                         except sqlite3.IntegrityError:
                             st.error("Já existe um modo de falha com este nome.")
                         except Exception as e:
@@ -607,34 +776,24 @@ def gerenciar_modos_falha_anomalias():
                                     return
 
                             try:
-                                cursor = conn.cursor()
-                                cursor.execute("""
-                                    UPDATE modos_falha 
-                                    SET id_tipo_modo_falha = ?, nome = ?, descricao = ?, 
-                                        referencia_tecnica = ?, image_path = ? 
-                                    WHERE id = ?
-                                """, (
-                                    novo_id_tipo,
-                                    novo_nome.strip(),
-                                    nova_descricao.strip() if nova_descricao else None,
-                                    nova_referencia.strip() if nova_referencia else None,
-                                    caminho_imagem,
-                                    modo_id
-                                ))
-                                
-                                cursor.execute("DELETE FROM modos_falha_tipo_barragem WHERE modos_falha_id = ?", (modo_id,))
-                                
-                                for tipo_barragem_id in novos_tipos_barragem:
-                                    cursor.execute("""
-                                        INSERT INTO modos_falha_tipo_barragem (modos_falha_id, tipo_barragem_id)
-                                        VALUES (?, ?)
-                                    """, (modo_id, tipo_barragem_id))
-                                
-                                conn.commit()
-                                st.success("Modo de falha atualizado com sucesso!")
-                                st.session_state.editando_modo_falha = None
-                                st.session_state.ultima_atualizacao = time.time()
-                                st.rerun()
+                                aplicado = executar_alteracao_config_ui(
+                                    "modos_falha",
+                                    "update",
+                                    {
+                                        "id_tipo_modo_falha": int(novo_id_tipo),
+                                        "nome": novo_nome.strip(),
+                                        "descricao": nova_descricao.strip() if nova_descricao else None,
+                                        "referencia_tecnica": nova_referencia.strip() if nova_referencia else None,
+                                        "image_path": caminho_imagem,
+                                        "tipos_barragem_ids": [int(x) for x in novos_tipos_barragem],
+                                    },
+                                    target_id=int(modo_id),
+                                    msg_sucesso="Modo de falha atualizado com sucesso!",
+                                )
+                                if aplicado:
+                                    st.session_state.editando_modo_falha = None
+                                    st.session_state.ultima_atualizacao = time.time()
+                                    st.rerun()
                             except sqlite3.IntegrityError:
                                 st.error("Já existe outro modo de falha com este nome.")
                             except Exception as e:
@@ -680,22 +839,23 @@ def gerenciar_modos_falha_anomalias():
 
                     if st.button("🗑️ Confirmar Exclusão", type="primary"):
                         try:
-                            cursor = conn.cursor()
-                            cursor.execute("DELETE FROM modos_falha_tipo_barragem WHERE modos_falha_id = ?", (modo_id,))
-                            cursor.execute("DELETE FROM modos_falha WHERE id = ?", (modo_id,))
-                            conn.commit()
-                            
-                            if img_modo and img_modo.exists():
-                                try:
-                                    img_modo.unlink()
-                                except OSError:
-                                    pass
-                            if modo_falha['image_path']:
-                                remover_midia_db(modo_falha['image_path'])
-                            
-                            st.success("Modo de falha excluído com sucesso!")
-                            st.session_state.ultima_atualizacao = time.time()
-                            st.rerun()
+                            aplicado = executar_alteracao_config_ui(
+                                "modos_falha",
+                                "delete",
+                                {"nome": modo_falha['nome']},
+                                target_id=int(modo_id),
+                                msg_sucesso="Modo de falha excluído com sucesso!",
+                            )
+                            if aplicado:
+                                if img_modo and img_modo.exists():
+                                    try:
+                                        img_modo.unlink()
+                                    except OSError:
+                                        pass
+                                if modo_falha['image_path']:
+                                    remover_midia_db(modo_falha['image_path'])
+                                st.session_state.ultima_atualizacao = time.time()
+                                st.rerun()
                         except Exception as e:
                             st.error(f"Erro ao excluir: {str(e)}")
 
@@ -818,39 +978,23 @@ def gerenciar_modos_falha_anomalias():
                         if cursor.fetchone():
                             st.error("Esta combinação de modo de falha e tipo de anomalia já existe")
                         else:
-                            # Insere a anomalia
-                            cursor.execute("""
-                                INSERT INTO anomalias 
-                                (modos_falha_id, usuario_id, tipo_anomalia_id, gravidade, peso, image_path)
-                                VALUES (?, ?, ?, ?, ?, ?)
-                            """, (
-                                modo_falha_id,
-                                st.session_state['usuario_id'],
-                                tipo_anomalia_id,
-                                gravidade,
-                                peso,
-                                caminho_imagem
-                            ))
-                            anomalia_id = cursor.lastrowid
-                            
-                            # Insere relacionamentos com zonas
-                            for zona_id in zonas_selecionadas:
-                                cursor.execute("""
-                                    INSERT INTO anomalia_zona (anomalia_id, zona_id)
-                                    VALUES (?, ?)
-                                """, (anomalia_id, zona_id))
-                            
-                            # Insere relacionamentos com materiais
-                            for material_id in materiais_selecionados:
-                                cursor.execute("""
-                                    INSERT INTO anomalia_tipo_material (anomalia_id, tipo_mat_id)
-                                    VALUES (?, ?)
-                                """, (anomalia_id, material_id))
-                            
-                            conn.commit()
-                            st.success("Anomalia e relacionamentos cadastrados com sucesso!")
-                            st.session_state.ultima_atualizacao = time.time()
-                            st.rerun()
+                            aplicado = executar_alteracao_config_ui(
+                                "anomalias",
+                                "create",
+                                {
+                                    "modos_falha_id": int(modo_falha_id),
+                                    "tipo_anomalia_id": int(tipo_anomalia_id),
+                                    "gravidade": float(gravidade),
+                                    "peso": float(peso),
+                                    "image_path": caminho_imagem,
+                                    "zonas_ids": [int(z) for z in zonas_selecionadas],
+                                    "materiais_ids": [int(m) for m in materiais_selecionados],
+                                },
+                                msg_sucesso="Anomalia e relacionamentos cadastrados com sucesso!",
+                            )
+                            if aplicado:
+                                st.session_state.ultima_atualizacao = time.time()
+                                st.rerun()
                     except Exception as e:
                         st.error(f"Erro ao cadastrar: {str(e)}")
 
@@ -934,36 +1078,24 @@ def gerenciar_modos_falha_anomalias():
                                 return
 
                         try:
-                            cursor = conn.cursor()
-                            cursor.execute("""
-                                UPDATE anomalias 
-                                SET gravidade = ?, peso = ?, image_path = ? 
-                                WHERE id = ?
-                            """, (
-                                nova_gravidade,
-                                novo_peso,
-                                caminho_imagem,
-                                anomalia_id
-                            ))
-                            
-                            cursor.execute("DELETE FROM anomalia_zona WHERE anomalia_id = ?", (anomalia_id,))
-                            for zona_id in novas_zonas:
-                                cursor.execute("""
-                                    INSERT INTO anomalia_zona (anomalia_id, zona_id)
-                                    VALUES (?, ?)
-                                """, (anomalia_id, zona_id))
-                            
-                            cursor.execute("DELETE FROM anomalia_tipo_material WHERE anomalia_id = ?", (anomalia_id,))
-                            for material_id in novos_materiais:
-                                cursor.execute("""
-                                    INSERT INTO anomalia_tipo_material (anomalia_id, tipo_mat_id)
-                                    VALUES (?, ?)
-                                """, (anomalia_id, material_id))
-                            
-                            conn.commit()
-                            st.success("Anomalia e relacionamentos atualizados com sucesso!")
-                            st.session_state.ultima_atualizacao = time.time()
-                            st.rerun()
+                            aplicado = executar_alteracao_config_ui(
+                                "anomalias",
+                                "update",
+                                {
+                                    "modo_falha": modo_atual,
+                                    "tipo_anomalia": tipo_atual,
+                                    "gravidade": float(nova_gravidade),
+                                    "peso": float(novo_peso),
+                                    "image_path": caminho_imagem,
+                                    "zonas_ids": [int(z) for z in novas_zonas],
+                                    "materiais_ids": [int(m) for m in novos_materiais],
+                                },
+                                target_id=int(anomalia_id),
+                                msg_sucesso="Anomalia e relacionamentos atualizados com sucesso!",
+                            )
+                            if aplicado:
+                                st.session_state.ultima_atualizacao = time.time()
+                                st.rerun()
                         except Exception as e:
                             st.error(f"Erro ao atualizar: {str(e)}")
 
@@ -1008,23 +1140,23 @@ def gerenciar_modos_falha_anomalias():
 
                 if st.button("🗑️ Confirmar Exclusão", type="primary"):
                     try:
-                        cursor = conn.cursor()
-                        cursor.execute("DELETE FROM anomalia_zona WHERE anomalia_id = ?", (anomalia_id,))
-                        cursor.execute("DELETE FROM anomalia_tipo_material WHERE anomalia_id = ?", (anomalia_id,))
-                        cursor.execute("DELETE FROM anomalias WHERE id = ?", (anomalia_id,))
-                        conn.commit()
-                        
-                        if img_anom and img_anom.exists():
-                            try:
-                                img_anom.unlink()
-                            except OSError:
-                                pass
-                        if anomalia['image_path']:
-                            remover_midia_db(anomalia['image_path'])
-                        
-                        st.success("Anomalia e relacionamentos excluídos com sucesso!")
-                        st.session_state.ultima_atualizacao = time.time()
-                        st.rerun()
+                        aplicado = executar_alteracao_config_ui(
+                            "anomalias",
+                            "delete",
+                            {"modo_falha": anomalia['modo_falha'], "tipo_anomalia": anomalia['tipo_anomalia']},
+                            target_id=int(anomalia_id),
+                            msg_sucesso="Anomalia e relacionamentos excluídos com sucesso!",
+                        )
+                        if aplicado:
+                            if img_anom and img_anom.exists():
+                                try:
+                                    img_anom.unlink()
+                                except OSError:
+                                    pass
+                            if anomalia['image_path']:
+                                remover_midia_db(anomalia['image_path'])
+                            st.session_state.ultima_atualizacao = time.time()
+                            st.rerun()
                     except Exception as e:
                         st.error(f"Erro ao excluir: {str(e)}")
 
@@ -1032,14 +1164,7 @@ def gerenciar_modos_falha_anomalias():
 def gerenciar_tipos_modo_falha():
     """Página de gerenciamento dos modos de falha"""
     st.title("⚙️ Tipos de modos de falha")
-
-    # Verifica permissão
-    if not st.session_state.get('is_admin'):
-        st.error("⛔ Acesso permitido apenas para administradores")
-        if st.button("← Voltar"):
-            st.session_state['pagina'] = "principal"
-            st.rerun()
-        return
+    exibir_aviso_workflow_config()
 
     # Conexão com o banco
     conn = conectar_db()
@@ -1066,21 +1191,19 @@ def gerenciar_tipos_modo_falha():
                     st.error("Nome e descrição são campos obrigatórios")
                 else:
                     try:
-                        cursor = conn.cursor()
-                        cursor.execute("""
-                            INSERT INTO tipo_modo_falha 
-                            (usuario_id, nome, descricao, referencia_tecnica)
-                            VALUES (?, ?, ?, ?)
-                        """, (
-                            st.session_state['usuario_id'],
-                            nome.strip(),
-                            descricao.strip(),
-                            referencia.strip() if referencia else None
-                        ))
-                        conn.commit()
-                        st.success("Modo de falha adicionado com sucesso!")
-                        time.sleep(1)
-                        st.rerun()
+                        aplicado = executar_alteracao_config_ui(
+                            "tipo_modo_falha",
+                            "create",
+                            {
+                                "nome": nome.strip(),
+                                "descricao": descricao.strip(),
+                                "referencia_tecnica": referencia.strip() if referencia else None,
+                            },
+                            msg_sucesso="Modo de falha adicionado com sucesso!",
+                        )
+                        if aplicado:
+                            time.sleep(0.5)
+                            st.rerun()
                     except sqlite3.IntegrityError:
                         st.error("Já existe um modo de falha com este nome.")
                     except Exception as e:
@@ -1120,21 +1243,20 @@ def gerenciar_tipos_modo_falha():
                             if not existente:
                                 st.error("Já existe outro modo de falha com este nome")
                             else:
-                                cursor = conn.cursor()
-                                cursor.execute("""
-                                    UPDATE tipo_modo_falha 
-                                    SET nome = ?, descricao = ?, referencia_tecnica = ?
-                                    WHERE id = ?
-                                """, (
-                                    novo_nome.strip(), 
-                                    nova_descricao.strip(), 
-                                    nova_referencia.strip() or None, 
-                                    modo_id
-                                ))
-                                conn.commit()
-                                st.success("Modo de falha atualizado com sucesso!")
-                                time.sleep(1)
-                                st.rerun()
+                                aplicado = executar_alteracao_config_ui(
+                                    "tipo_modo_falha",
+                                    "update",
+                                    {
+                                        "nome": novo_nome.strip(),
+                                        "descricao": nova_descricao.strip(),
+                                        "referencia_tecnica": nova_referencia.strip() or None,
+                                    },
+                                    target_id=int(modo_id),
+                                    msg_sucesso="Modo de falha atualizado com sucesso!",
+                                )
+                                if aplicado:
+                                    time.sleep(0.5)
+                                    st.rerun()
                         except Exception as e:
                             st.error(f"Erro ao atualizar: {str(e)}")
 
@@ -1159,12 +1281,16 @@ def gerenciar_tipos_modo_falha():
 
             if st.button("🗑️ Confirmar Exclusão", type="primary"):
                 try:
-                    cursor = conn.cursor()
-                    cursor.execute("DELETE FROM tipo_modo_falha WHERE id = ?", (modo_id,))
-                    conn.commit()
-                    st.success("Modo de falha excluído com sucesso!")
-                    time.sleep(1)
-                    st.rerun()
+                    aplicado = executar_alteracao_config_ui(
+                        "tipo_modo_falha",
+                        "delete",
+                        {"nome": modo_falha['nome']},
+                        target_id=int(modo_id),
+                        msg_sucesso="Modo de falha excluído com sucesso!",
+                    )
+                    if aplicado:
+                        time.sleep(0.5)
+                        st.rerun()
                 except sqlite3.Error as e:
                     st.error(f"Erro ao excluir: {str(e)}")
 
@@ -1407,14 +1533,7 @@ def atualizar_zona_db(zona_id, material_id, nome, descricao=None):
 def gerenciar_tipos_materiais():
     """Página de gerenciamento dos tipos de materiais"""
     st.title("⚙️ Gerenciamento de Tipos de Materiais")
-
-    # Verifica permissão
-    if not st.session_state.get('is_admin'):
-        st.error("⛔ Acesso permitido apenas para administradores")
-        if st.button("← Voltar"):
-            st.session_state['pagina'] = "principal"
-            st.rerun()
-        return
+    exibir_aviso_workflow_config()
 
     # Conexão com o banco
     conn = conectar_db()
@@ -1441,19 +1560,21 @@ def gerenciar_tipos_materiais():
             if st.form_submit_button("💾 Salvar Novo Material"):
                 if not nome.strip():
                     st.error("⚠️ O nome do material é obrigatório.")
-                # else:
-                #     success, message = cadastrar_tipo_material_db(
-                #         usuario_id=st.session_state['usuario_id'],
-                #         nome=nome.strip(),
-                #         descricao=descricao.strip() if descricao else None
-                #     )
-                    
-                #     if success:
-                #         st.success(message)
-                #         time.sleep(1)
-                #         st.rerun()
-                #     else:
-                #         st.error(message)
+                else:
+                    try:
+                        aplicado = executar_alteracao_config_ui(
+                            "tipos_materiais",
+                            "create",
+                            {"nome": nome.strip(), "descricao": descricao.strip() if descricao else None},
+                            msg_sucesso="✅ Material cadastrado com sucesso!",
+                        )
+                        if aplicado:
+                            time.sleep(0.5)
+                            st.rerun()
+                    except sqlite3.IntegrityError:
+                        st.error("⛔ Já existe um material com esse nome.")
+                    except Exception as e:
+                        st.error(f"Erro ao cadastrar material: {str(e)}")
 
     elif modo == "Editar":
         st.subheader("Editar Tipo de Material Existente")
@@ -1488,16 +1609,16 @@ def gerenciar_tipos_materiais():
                             if not existente:
                                 st.error(f"⛔ Já existe outro material com o nome '{novo_nome.strip()}'")
                             else:
-                                cursor = conn.cursor()
-                                cursor.execute("""
-                                    UPDATE tipos_materiais 
-                                    SET nome = ?, descricao = ?
-                                    WHERE id = ?
-                                """, (novo_nome.strip(), nova_descricao.strip() or None, material_id))
-                                conn.commit()
-                                st.success("✅ Material atualizado com sucesso!")
-                                time.sleep(1)
-                                st.rerun()
+                                aplicado = executar_alteracao_config_ui(
+                                    "tipos_materiais",
+                                    "update",
+                                    {"nome": novo_nome.strip(), "descricao": nova_descricao.strip() or None},
+                                    target_id=int(material_id),
+                                    msg_sucesso="✅ Material atualizado com sucesso!",
+                                )
+                                if aplicado:
+                                    time.sleep(0.5)
+                                    st.rerun()
                         except Exception as e:
                             st.error(f"Erro ao atualizar material: {str(e)}")
 
@@ -1545,11 +1666,16 @@ def gerenciar_tipos_materiais():
                             st.info(f"Tabela `{tabela}` não existe ou não pode ser consultada: {e}")
 
                     if not em_uso:
-                        conn.execute("DELETE FROM tipos_materiais WHERE id = ?", (material_id,))
-                        conn.commit()
-                        st.success("✅ Material excluído com sucesso!")
-                        time.sleep(1)
-                        st.rerun()
+                        aplicado = executar_alteracao_config_ui(
+                            "tipos_materiais",
+                            "delete",
+                            {"nome": material['nome']},
+                            target_id=int(material_id),
+                            msg_sucesso="✅ Material excluído com sucesso!",
+                        )
+                        if aplicado:
+                            time.sleep(0.5)
+                            st.rerun()
 
                 except Exception as e:
                     st.error(f"Erro ao excluir material: {str(e)}")
@@ -1584,6 +1710,7 @@ def gerenciar_tipos_materiais():
 def gerenciar_tipos_zonas():
     """Página de gerenciamento dos tipos de zonas de barragens"""
     st.title("⚙️ Gerenciamento de tipos de zonas de barragens")
+    exibir_aviso_workflow_config()
     
     # Conexão com o banco
     conn = conectar_db()
@@ -1607,11 +1734,14 @@ def gerenciar_tipos_zonas():
             if st.form_submit_button("💾 Salvar Novo Tipo"):
                 if nome:
                     try:
-                        conn.execute("INSERT INTO tipos_zonas_bar (nome, descricao) VALUES (?, ?)", 
-                                   (nome.strip(), descricao.strip() if descricao else None))
-                        conn.commit()
-                        st.success("Tipo de zona adicionado com sucesso!")
-                        st.rerun()
+                        aplicado = executar_alteracao_config_ui(
+                            "tipos_zonas_bar",
+                            "create",
+                            {"nome": nome.strip(), "descricao": descricao.strip() if descricao else None},
+                            msg_sucesso="Tipo de zona adicionado com sucesso!",
+                        )
+                        if aplicado:
+                            st.rerun()
                     except sqlite3.IntegrityError:
                         st.error("Já existe um tipo de zona com este nome")
                 else:
@@ -1642,13 +1772,15 @@ def gerenciar_tipos_zonas():
                 if st.form_submit_button("💾 Salvar Alterações"):
                     if novo_nome:
                         try:
-                            conn.execute(
-                                "UPDATE tipos_zonas_bar SET nome = ?, descricao = ? WHERE id = ?",
-                                (novo_nome.strip(), nova_descricao.strip() if nova_descricao else None, zona_id)
+                            aplicado = executar_alteracao_config_ui(
+                                "tipos_zonas_bar",
+                                "update",
+                                {"nome": novo_nome.strip(), "descricao": nova_descricao.strip() if nova_descricao else None},
+                                target_id=int(zona_id),
+                                msg_sucesso="Tipo de zona atualizado com sucesso!",
                             )
-                            conn.commit()
-                            st.success("Tipo de zona atualizado com sucesso!")
-                            st.rerun()
+                            if aplicado:
+                                st.rerun()
                         except sqlite3.IntegrityError:
                             st.error("Já existe outro tipo de zona com este nome")
                     else:
@@ -1674,10 +1806,15 @@ def gerenciar_tipos_zonas():
             
             if st.button("🗑️ Confirmar Exclusão", type="primary"):
                 try:
-                    conn.execute("DELETE FROM tipos_zonas_bar WHERE id = ?", (zona_id,))
-                    conn.commit()
-                    st.success("Tipo de zona excluído com sucesso!")
-                    st.rerun()
+                    aplicado = executar_alteracao_config_ui(
+                        "tipos_zonas_bar",
+                        "delete",
+                        {"nome": zona['nome']},
+                        target_id=int(zona_id),
+                        msg_sucesso="Tipo de zona excluído com sucesso!",
+                    )
+                    if aplicado:
+                        st.rerun()
                 except sqlite3.Error as e:
                     st.error(f"Erro ao excluir: {str(e)}")
     
@@ -1842,14 +1979,7 @@ def cadastrar_tipo_barragem_db(usuario_id, nome, descricao, referencia_tecnica=N
 def gerenciar_tipos_barragem():
     """Página de gerenciamento dos tipos de barragem"""
     st.title("⚙️ Gerenciamento de tipos de barragem")
-
-    # Verifica permissão
-    if not st.session_state.get('is_admin'):
-        st.error("⛔ Acesso permitido apenas para administradores")
-        if st.button("← Voltar"):
-            st.session_state['pagina'] = "principal"
-            st.rerun()
-        return
+    exibir_aviso_workflow_config()
 
     # Conexão com o banco
     conn = conectar_db()
@@ -1880,18 +2010,27 @@ def gerenciar_tipos_barragem():
                     if caminho_imagem is None:
                         return
 
-                # Insere no banco usando função robusta
-                resultado = cadastrar_tipo_barragem_db(
-                    usuario_id=st.session_state['usuario_id'],
-                    nome=nome.strip(),
-                    descricao=descricao.strip(),
-                    referencia_tecnica=referencia.strip() if referencia else None,
-                    image_path=caminho_imagem
-                )
-
-                if resultado:
-                    st.success("Tipo de barragem adicionado com sucesso!")
-                    st.rerun()
+                if not nome.strip() or not descricao.strip():
+                    st.error("Nome e descrição técnica são obrigatórios.")
+                else:
+                    try:
+                        aplicado = executar_alteracao_config_ui(
+                            "tipos_barragem",
+                            "create",
+                            {
+                                "nome": nome.strip(),
+                                "descricao": descricao.strip(),
+                                "referencia_tecnica": referencia.strip() if referencia else None,
+                                "image_path": caminho_imagem,
+                            },
+                            msg_sucesso="Tipo de barragem adicionado com sucesso!",
+                        )
+                        if aplicado:
+                            st.rerun()
+                    except sqlite3.IntegrityError:
+                        st.error("Já existe um tipo de barragem com este nome.")
+                    except Exception as e:
+                        st.error(f"Erro ao cadastrar tipo de barragem: {str(e)}")
 
     elif modo == "Editar":
         st.subheader("Editar Tipo de Barragem Existente")
@@ -1921,14 +2060,20 @@ def gerenciar_tipos_barragem():
                             return
 
                     try:
-                        conn.execute("""
-                            UPDATE tipos_barragem 
-                            SET nome = ?, descricao = ?, referencia_tecnica = ?, image_path = ?
-                            WHERE id = ?
-                        """, (novo_nome.strip(), nova_descricao.strip(), nova_referencia.strip() or None, caminho_imagem, tipo_id))
-                        conn.commit()
-                        st.success("Tipo de barragem atualizado com sucesso!")
-                        st.rerun()
+                        aplicado = executar_alteracao_config_ui(
+                            "tipos_barragem",
+                            "update",
+                            {
+                                "nome": novo_nome.strip(),
+                                "descricao": nova_descricao.strip(),
+                                "referencia_tecnica": nova_referencia.strip() or None,
+                                "image_path": caminho_imagem,
+                            },
+                            target_id=int(tipo_id),
+                            msg_sucesso="Tipo de barragem atualizado com sucesso!",
+                        )
+                        if aplicado:
+                            st.rerun()
                     except sqlite3.IntegrityError:
                         st.error("Já existe outro tipo de barragem com este nome.")
 
@@ -1957,10 +2102,15 @@ def gerenciar_tipos_barragem():
 
             if st.button("🗑️ Confirmar Exclusão", type="primary"):
                 try:
-                    conn.execute("DELETE FROM tipos_barragem WHERE id = ?", (tipo_id,))
-                    conn.commit()
-                    st.success("Tipo de barragem excluído com sucesso!")
-                    st.rerun()
+                    aplicado = executar_alteracao_config_ui(
+                        "tipos_barragem",
+                        "delete",
+                        {"nome": tipo['nome']},
+                        target_id=int(tipo_id),
+                        msg_sucesso="Tipo de barragem excluído com sucesso!",
+                    )
+                    if aplicado:
+                        st.rerun()
                 except sqlite3.Error as e:
                     st.error(f"Erro ao excluir: {str(e)}")
 
@@ -2010,18 +2160,32 @@ def editar_barragem(barragem):
         with col2:
             submitted1 = st.form_submit_button("🗑️ Excluir")
             if submitted1:
-                excluir_barragem(barragem[0])
-                st.success("Barragem excluida com sucesso!")
-                st.rerun()
+                try:
+                    excluir_barragem_escopo(obter_perfil_atual(), st.session_state['usuario_id'], barragem[0])
+                    st.success("Barragem excluída com sucesso!")
+                    st.rerun()
+                except PermissionError:
+                    st.error(t("dam_unauthorized"))
 
         with col3:
-            submitted = st.form_submit_button("Salvar Alterações")
+            submitted = st.form_submit_button("💾 Guardar Alterações")
             if submitted:
-                atualizar_barragem(
-                    barragem[0], nome, tipo_id, localizacao, altura, comprimento, rel_cordaaltura
-                )
-                st.success("Barragem atualizada com sucesso!")
-                st.rerun()
+                try:
+                    atualizar_barragem_escopo(
+                        obter_perfil_atual(),
+                        st.session_state['usuario_id'],
+                        barragem[0],
+                        nome,
+                        tipo_id,
+                        localizacao,
+                        altura,
+                        comprimento,
+                        rel_cordaaltura,
+                    )
+                    st.success("Barragem atualizada com sucesso!")
+                    st.rerun()
+                except PermissionError:
+                    st.error(t("dam_unauthorized"))
        
 def mostrar_lista_barragens(barragens):
     """Mostra lista de barragens com exclusão segura"""
@@ -2044,10 +2208,12 @@ def mostrar_lista_barragens(barragens):
             col1, col2 = st.columns(2)
             with col1:
                 if st.button("Selecionar para Análise", key=f"select_{barragem_id}"):
-                    definir_barragem_analise(st.session_state['usuario_id'], barragem_id)
-                    # st.success(f"✅ Barragem **{barragem_nome}** selecionada para análise!")
-                    st.success(f"✅ Barragem **{nome_barragem}** selecionada para análise!")
-                    st.rerun()
+                    try:
+                        definir_barragem_analise_escopo(obter_perfil_atual(), st.session_state['usuario_id'], barragem_id)
+                        st.success(f"✅ Barragem **{nome_barragem}** selecionada para análise!")
+                        st.rerun()
+                    except PermissionError:
+                        st.error(t("dam_unauthorized"))
 
             with col2:
                 if st.button("🗑️ Excluir", key=f"delete_{barragem_id}"):
@@ -2179,97 +2345,123 @@ def pagina_cadastro():
                     st.error("❌ Erro ao cadastrar usuário.")
 
 def pagina_admin_usuarios():
-    """Página de administração de usuários"""
-    st.title("👥 Administração de Usuários")
-    
-    # Lista de usuários em formato de tabela editável
+    """Página de administração de utilizadores e perfis RBAC (apenas Usuário Supremo)."""
+    role_atual = obter_perfil_atual()
+    if not can_manage_users(role_atual):
+        st.error(t("users_denied"))
+        return
+
+    st.title(t("users_title"))
     usuarios = listar_usuarios()
-    
+
     if not usuarios.empty:
-        # Exibir tabela com opções de edição
+        opcoes_role = [ROLE_SUPER_ADMIN, ROLE_APPROVER, ROLE_USER]
         for _, usuario in usuarios.iterrows():
-            col1, col2, col3, col4 = st.columns([3, 2, 2, 2])
-            
+            col1, col2, col3, col4 = st.columns([3, 2, 3, 2])
+            role_u = normalizar_role(usuario.get('role'), usuario.get('is_admin', 0))
+
             with col1:
-                st.write(f"**{usuario['nome']}**")
-                st.caption(f"Email: {usuario['email']}")
-                st.caption(f"Criado em: {usuario['data_criacao']}")
-            
+                st.write(f"**{usuario['nome']}** · `{usuario['codigo']}`")
+                st.caption(f"{t('email_label')}: {usuario['email']}")
+                st.caption(f"{rotulo_perfil(role_u)} · {usuario['data_criacao']}")
+
             with col2:
                 novo_status = st.selectbox(
-                    "Status",
+                    t("users_status"),
                     ["sim", "não"],
                     index=0 if usuario['ativo'] == "sim" else 1,
                     key=f"status_{usuario['codigo']}"
                 )
                 if novo_status != usuario['ativo']:
-                    if st.button("Atualizar Status", key=f"upd_status_{usuario['codigo']}"):
-                        if atualizar_status_usuario(usuario['codigo'], novo_status):
-                            st.success("Status atualizado!")
-                            st.rerun()
-            
-            with col3:
-                admin_status = st.checkbox(
-                    "Administrador",
-                    value=bool(usuario['is_admin']),
-                    key=f"admin_{usuario['codigo']}"
-                )
-                if admin_status != usuario['is_admin']:
-                    if st.button("Atualizar Acesso", key=f"upd_admin_{usuario['codigo']}"):
-                        if atualizar_admin_usuario(usuario['codigo'], int(admin_status)):
-                            st.success("Acesso atualizado!")
-                            st.rerun()
-            
-            with col4:
-                if usuario['email'] != "admin@insid.com":  # Não permitir excluir o admin principal
-                    if st.button("Excluir", key=f"del_{usuario['codigo']}"):
-                        if excluir_usuario(usuario['codigo']):
-                            st.success("Usuário excluído!")
-                            st.rerun()
-                else:
-                    st.write("")  # Espaço vazio para alinhamento
-    else:
-        st.warning("Nenhum usuário cadastrado.")
+                    if st.button(t("users_update_status"), key=f"upd_status_{usuario['codigo']}"):
+                        try:
+                            if alterar_status_usuario_seguro(role_atual, usuario['codigo'], novo_status):
+                                st.success("✅")
+                                st.rerun()
+                        except PermissionError as exc:
+                            st.error(str(exc))
 
-    # Adicionar espaço e botão de voltar
+            with col3:
+                novo_role = st.selectbox(
+                    t("users_role"),
+                    opcoes_role,
+                    index=opcoes_role.index(role_u) if role_u in opcoes_role else 2,
+                    format_func=rotulo_perfil,
+                    key=f"role_{usuario['codigo']}",
+                )
+                if novo_role != role_u:
+                    if st.button(t("users_update_role"), key=f"upd_role_{usuario['codigo']}"):
+                        try:
+                            if alterar_role_usuario_seguro(role_atual, usuario['codigo'], novo_role):
+                                st.success(t("users_role_updated"))
+                                st.rerun()
+                            else:
+                                st.warning(t("users_role_blocked"))
+                        except (PermissionError, ValueError) as exc:
+                            st.error(str(exc))
+
+            with col4:
+                if usuario['email'] != "admin@insid.com" and usuario['codigo'] != st.session_state.get('usuario_id'):
+                    if st.button(f"🗑️ {t('users_delete')}", key=f"del_{usuario['codigo']}"):
+                        try:
+                            if excluir_usuario_seguro(role_atual, usuario['codigo']):
+                                st.success("✅")
+                                st.rerun()
+                        except PermissionError as exc:
+                            st.error(str(exc))
+                else:
+                    st.write("")
+    else:
+        st.warning("Nenhum utilizador registado.")
+
     st.write("")
-    if st.button("⬅️ Voltar"):
-        st.session_state['pagina'] = "principal"
+    if st.button(t("back_btn")):
+        st.session_state['pagina'] = pagina_inicial_por_perfil(role_atual)
         st.rerun()
 
 def pagina_login():
-    """Página de login"""
-    st.title("🔐 Bem-vindo ao Sistema inSID")
+    """Página de login com seletor de idioma e encaminhamento por perfil RBAC."""
+    col_top_l, col_top_r = st.columns([3, 1])
+    with col_top_l:
+        st.title(t("login_title"))
+        st.caption(t("login_subtitle"))
+    with col_top_r:
+        render_seletor_idioma("login")
 
     col1, col2 = st.columns([1, 2])
     with col1:
         if LOGO_PATH.exists():
-            st.image(str(LOGO_PATH), caption="Metodologia inSID", width=150)
+            st.image(str(LOGO_PATH), caption="Metodologia inSID", width=160)
     with col2:
         with st.form("login_form"):
-            email = st.text_input("E-mail")
-            senha = st.text_input("Senha", type="password")
-            entrar = st.form_submit_button("Entrar")
+            email = st.text_input(t("email_label"))
+            senha = st.text_input(t("password_label"), type="password")
+            entrar = st.form_submit_button(t("login_btn"), type="primary")
 
             if entrar:
                 resultado = verificar_credenciais(email, senha)
                 if resultado:
-                    usuario_id, nome, is_admin = resultado
+                    usuario_id, nome, is_admin, role = resultado
+                    role_norm = normalizar_role(role, is_admin)
                     st.session_state.update({
                         'logado': True,
                         'email': email,
                         'usuario_id': usuario_id,
                         'usuario_nome': nome,
-                        'is_admin': bool(is_admin)
+                        'is_admin': role_norm == ROLE_SUPER_ADMIN,
+                        'role': role_norm,
+                        'pagina': pagina_inicial_por_perfil(role_norm),
                     })
-                    st.success(f"✅ Bem-vindo, {nome}!")
+                    st.success(t("login_welcome", name=nome))
                     st.rerun()
                 else:
-                    st.error("❌ Credenciais inválidas ou usuário inativo.")
+                    st.error(t("login_invalid"))
 
 def logout():
-    """Limpa a sessão e volta para o login"""
+    """Limpa a sessão preservando o idioma escolhido e volta para o login."""
+    idioma_atual = obter_idioma()
     st.session_state.clear()
+    st.session_state["lang"] = idioma_atual
     st.rerun()
 
 
@@ -2698,6 +2890,12 @@ def identificar_modo_falha_provavel(barragem_id):
     3. Zona da anomalia observada vs zonas associadas às anomalias do sistema
     4. Peso das anomalias para cada modo de falha
     """
+    role = obter_perfil_atual()
+    usuario_id = st.session_state.get('usuario_id')
+    if not obter_barragem_autorizada(role, usuario_id, barragem_id):
+        st.error(t("dam_unauthorized"))
+        return
+
     conn = conectar_db()
     
     try:
@@ -2907,47 +3105,69 @@ def identificar_modo_falha_provavel(barragem_id):
 
 
 def pagina_principal():
-    """Página principal após login com gestão completa de barragens"""
-    st.title("📊 Página Inicial - Sistema inSID")
-    st.write(f"👤 Usuário logado: {st.session_state['usuario_nome']}")
+    """Página principal de análises de barragens com isolamento estrito por perfil RBAC."""
+    role = obter_perfil_atual()
+    usuario_id = st.session_state['usuario_id']
+
+    if not can_access_dam_analyses(role):
+        st.title(t("approvals_title"))
+        st.info(t("approver_no_analyses"))
+        if st.button(t("go_to_approvals"), type="primary"):
+            st.session_state['pagina'] = "fila_aprovacoes"
+            st.rerun()
+        return
+
+    titulo = t("principal_title_all") if can_view_all_dam_analyses(role) else t("principal_title_mine")
+    st.title(titulo)
+    st.markdown(t("logged_user_line", name=st.session_state['usuario_nome'], role=rotulo_perfil(role)))
 
     # Inicializar zonas padrão se necessário
     inicializar_zonas_padrao()
 
-    # Barra de seleção de barragem em análise
-    st.subheader("🔍 Barragem em Análise")
-    barragens_usuario = obter_barragens_usuario(st.session_state['usuario_id'])
-    barragem_analise = obter_barragem_analise(st.session_state['usuario_id'])
+    # Barra de seleção de barragem em análise (com isolamento estrito por perfil)
+    st.subheader(t("dam_in_analysis"))
+    barragens_usuario = listar_barragens_escopo(role, usuario_id)
+    barragem_analise = obter_barragem_analise_escopo(role, usuario_id)
 
     if barragem_analise:
-        st.success(f"Barragem atual em análise: {barragem_analise[2]}")
+        st.success(t("dam_current", name=barragem_analise[2]))
     else:
-        st.warning("Nenhuma barragem selecionada para análise")
+        st.warning(t("dam_none_selected"))
 
     if barragens_usuario:
         barragem_selecionada = str(barragem_analise[0]) if barragem_analise else ""
-        opcoes_barragens = {str(b[0]): f"{b[1]}" for b in barragens_usuario}
-        opcoes_barragens[""] = "Selecione uma barragem..."
+        opcoes_barragens = {"": t("dam_select_placeholder")}
+        for b in barragens_usuario:
+            if can_view_all_dam_analyses(role) and len(b) > 7 and b[7]:
+                opcoes_barragens[str(b[0])] = f"{b[1]} · ({b[7]})"
+            else:
+                opcoes_barragens[str(b[0])] = f"{b[1]}"
+
+        chaves_opcoes = list(opcoes_barragens.keys())
+        idx_atual = chaves_opcoes.index(barragem_selecionada) if barragem_selecionada in chaves_opcoes else 0
 
         col1, col2 = st.columns([3, 1])
         with col1:
             nova_barragem = st.selectbox(
-                "Selecione a barragem para análise:",
-                options=opcoes_barragens.keys(),
-                format_func=lambda x: opcoes_barragens.get(x, "Selecione..."),
-                index=list(opcoes_barragens.keys()).index(barragem_selecionada) if barragem_selecionada else 0
+                t("dam_select_label"),
+                options=chaves_opcoes,
+                format_func=lambda x: opcoes_barragens.get(x, t("dam_select_placeholder")),
+                index=idx_atual
             )
 
         with col2:
             st.write("")
             st.write("")
-            if st.button("💾 Salvar Seleção"):
+            if st.button(t("dam_save_selection"), type="primary"):
                 if nova_barragem:
-                    definir_barragem_analise(st.session_state['usuario_id'], int(nova_barragem))
-                    st.success(f"Barragem {opcoes_barragens[nova_barragem]} definida para análise!")
-                    st.rerun()
+                    try:
+                        definir_barragem_analise_escopo(role, usuario_id, int(nova_barragem))
+                        st.success(t("dam_current", name=opcoes_barragens[nova_barragem]))
+                        st.rerun()
+                    except PermissionError:
+                        st.error(t("dam_unauthorized"))
                 else:
-                    st.error("Selecione uma barragem válida")
+                    st.error(t("dam_none_selected"))
 
         if barragem_analise:
             with st.expander("📝 Editar Barragem"):
@@ -3141,130 +3361,145 @@ def pagina_principal():
                     st.info("Nenhuma anomalia registrada para esta barragem")
 
     else:
-        st.warning("Você ainda não cadastrou nenhuma barragem. Vá para a seção de barragens para criar uma.")
-
-
-
-
-
-
-
-
-
-
-
-
-
+        st.info(t("dam_empty_cta"))
+        if st.button(t("dam_register_now"), type="primary"):
+            st.session_state['pagina'] = "cadastro_barragem"
+            st.rerun()
 
 
 def menu_lateral():
-    """Menu lateral otimizado para performance"""
+    """Menu lateral limpo e contextual por perfil RBAC com seletor de idioma PT/EN."""
+    role = obter_perfil_atual()
+    usuario_id = st.session_state.get('usuario_id')
+    nome_utilizador = st.session_state.get('usuario_nome', '')
+
     with st.sidebar:
-        # Variável para controlar redirecionamentos
+        st.markdown(
+            f'<div class="desproj-brand-header">'
+            f'<div class="brand-title">{t("brand_title")}</div>'
+            f'<div class="brand-sub">{t("brand_sub")}</div>'
+            f'<span class="desproj-role-badge">{rotulo_perfil(role)}</span>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+        st.caption(f"👤 {nome_utilizador}")
+        render_seletor_idioma("sidebar")
+
         redirecionar = None
-               
-        # Seção de Administração
-        if st.session_state.get('is_admin'):
-            st.subheader("🛡️ Administração")
-            if st.button("👥 Gerenciar Usuários"):
-                redirecionar = "admin_usuarios"
 
-        st.markdown("---")
-
-        # Menu Principal
-        if st.button("🏠 Metodologia inSID"):
-            redirecionar = "principal"
-        
-        st.markdown("---")
-
-        # Menu Principal
-        st.subheader("📋 Gerenciar barragens")
-        if st.button("➕ Cadastrar nova barragem"):
-            redirecionar = "cadastro_barragem"
-        
-        # Seção de Administração
-        if st.session_state.get('is_admin'):
-
+        # 1. Secção de Administração e Aprovações
+        if can_manage_users(role) or can_approve_configs(role):
             st.markdown("---")
+            st.subheader(t("nav_admin_section"))
+            if can_manage_users(role):
+                if st.button(t("nav_manage_users"), use_container_width=True):
+                    redirecionar = "admin_usuarios"
+            if can_approve_configs(role):
+                qtd_pend = contar_propostas_pendentes()
+                if st.button(t("nav_approval_queue", count=qtd_pend), use_container_width=True):
+                    redirecionar = "fila_aprovacoes"
+        else:
+            st.markdown("---")
+            minhas_pend = len(listar_propostas_configuracao(role, usuario_id, status_filter="pending"))
+            if st.button(t("nav_my_proposals", count=minhas_pend), use_container_width=True):
+                redirecionar = "minhas_propostas"
 
-            st.subheader("⚙️Configurações das barragens")
+        # 2. Análises de Barragens (oculto para Aprovador; global para Usuário Supremo; próprio para Usuário Normal)
+        if can_access_dam_analyses(role):
+            st.markdown("---")
+            st.subheader(t("nav_analyses_section"))
+            home_label = t("nav_home_all") if can_view_all_dam_analyses(role) else t("nav_home_mine")
+            if st.button(home_label, use_container_width=True):
+                redirecionar = "principal"
+            if st.button(t("nav_register_dam"), use_container_width=True):
+                redirecionar = "cadastro_barragem"
 
-            if st.button("➕ Tipos de barragens"):
-                redirecionar = "gerenciar_tipos_barragem"
-            
-            if st.button("➕ Zonas das barragens"):
-                redirecionar = "cadastro_zonas_barragem"
-            
-            if st.button("➕ Tipos de materiais"):
-                redirecionar = "gerenciar_tipos_materiais"
-            
-            st.subheader("⚙️Configurações dos modos de falha")
-            
-            if st.button("➕ Gerenciar tipos de anomalias"):
-                redirecionar = "gerenciar_tipos_anomalia"
+        # 3. Configurações das Barragens (todos os perfis; Usuário Normal cria propostas pendentes)
+        st.markdown("---")
+        st.subheader(t("nav_dam_configs"))
+        if st.button(t("nav_dam_types"), use_container_width=True):
+            redirecionar = "gerenciar_tipos_barragem"
+        if st.button(t("nav_dam_zones"), use_container_width=True):
+            redirecionar = "cadastro_zonas_barragem"
+        if st.button(t("nav_materials"), use_container_width=True):
+            redirecionar = "gerenciar_tipos_materiais"
 
-            if st.button("➕ Tipos de modos de falha"):
-                redirecionar = "gerenciar_tipos_modo_falha"
-            
-            if st.button("➕ Gerenciar modos de falha"):
-                redirecionar = "gerenciar_modos_falha_anomalias"
-
-            
+        # 4. Configurações dos Modos de Falha
+        st.markdown("---")
+        st.subheader(t("nav_fm_configs"))
+        if st.button(t("nav_anomaly_types"), use_container_width=True):
+            redirecionar = "gerenciar_tipos_anomalia"
+        if st.button(t("nav_fm_categories"), use_container_width=True):
+            redirecionar = "gerenciar_tipos_modo_falha"
+        if st.button(t("nav_fm_manage"), use_container_width=True):
+            redirecionar = "gerenciar_modos_falha_anomalias"
 
         st.markdown("---")
-        
-        # Logout
-        if st.button("🚪 Sair"):
+        if st.button(t("logout_btn"), use_container_width=True):
             logout()
-            return  # Encerra a execução após logout
-        
-        # Processa redirecionamento se necessário
+            return
+
         if redirecionar:
             st.session_state['pagina'] = redirecionar
-            st.rerun() 
+            st.rerun()
+
 
 def main():
-    """Função principal que controla o fluxo do aplicativo"""
+    """Função principal que controla o fluxo do aplicativo com RBAC e i18n."""
     if 'logado' not in st.session_state:
         st.session_state['logado'] = False
         st.session_state['pagina'] = "login"
 
     if not st.session_state['logado']:
-        tab1, tab2 = st.tabs(["🔑 Login", "📝 Cadastro"])
+        tab1, tab2 = st.tabs([t("tab_login"), t("tab_register")])
         with tab1:
             pagina_login()
         with tab2:
             pagina_cadastro()
     else:
-
+        role = obter_perfil_atual()
         menu_lateral()
 
-        if st.session_state.get('pagina') == "cadastro_barragem":
+        pagina = st.session_state.get('pagina') or pagina_inicial_por_perfil(role)
+
+        if pagina == "cadastro_barragem":
             exibir_formulario_cadastro_barragem()
 
-        elif st.session_state.get('pagina') == "admin_usuarios" and st.session_state.get('is_admin'):
+        elif pagina == "admin_usuarios":
             pagina_admin_usuarios()
 
-        elif st.session_state.get('pagina') == "gerenciar_tipos_barragem":
+        elif pagina == "fila_aprovacoes":
+            pagina_fila_aprovacoes()
+
+        elif pagina == "minhas_propostas":
+            pagina_minhas_propostas()
+
+        elif pagina == "gerenciar_tipos_barragem":
             gerenciar_tipos_barragem()
-        
-        elif st.session_state.get('pagina') == "cadastro_zonas_barragem":
+
+        elif pagina == "cadastro_zonas_barragem":
             gerenciar_tipos_zonas()
-        
-        elif st.session_state.get('pagina') == "gerenciar_tipos_materiais":
+
+        elif pagina == "gerenciar_tipos_materiais":
             gerenciar_tipos_materiais()
-        
-        elif st.session_state.get('pagina') == "gerenciar_tipos_modo_falha":
+
+        elif pagina == "gerenciar_tipos_modo_falha":
             gerenciar_tipos_modo_falha()
 
-        elif st.session_state.get('pagina') == "gerenciar_tipos_anomalia":
+        elif pagina == "gerenciar_tipos_anomalia":
             gerenciar_tipos_anomalia()
-            
-        elif st.session_state.get('pagina') == "gerenciar_modos_falha_anomalias":
-            gerenciar_modos_falha_anomalias()         
-            
-        else:
+
+        elif pagina == "gerenciar_modos_falha_anomalias":
+            gerenciar_modos_falha_anomalias()
+
+        elif pagina == "principal":
             pagina_principal()
+
+        else:
+            if can_access_dam_analyses(role):
+                pagina_principal()
+            else:
+                pagina_fila_aprovacoes()
 
 if __name__ == "__main__":
     main()
