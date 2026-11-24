@@ -119,7 +119,7 @@ def render_seletor_idioma(key_suffix: str = "sidebar") -> None:
     escolha = st.radio(
         t("lang_label"),
         options=["pt", "en"],
-        format_func=lambda c: "🇵🇹 Português" if c == "pt" else "🇬🇧 English",
+        format_func=lambda c: "Português" if c == "pt" else "English",
         index=0 if atual == "pt" else 1,
         horizontal=True,
         key=f"lang_selector_{key_suffix}",
@@ -2406,10 +2406,10 @@ def pagina_admin_usuarios():
 
             with col4:
                 if usuario['email'] != "admin@insid.com" and usuario['codigo'] != st.session_state.get('usuario_id'):
-                    if st.button(f"🗑️ {t('users_delete')}", key=f"del_{usuario['codigo']}"):
+                    if st.button(t('users_delete'), key=f"del_{usuario['codigo']}"):
                         try:
                             if excluir_usuario_seguro(role_atual, usuario['codigo']):
-                                st.success("✅")
+                                st.success("Utilizador excluído.")
                                 st.rerun()
                         except PermissionError as exc:
                             st.error(str(exc))
@@ -2922,9 +2922,9 @@ def identificar_modo_falha_provavel(barragem_id):
             conn
         ).iloc[0]
         
-        st.subheader(f"🔍 Análise para Barragem (Tipo: {tipo_barragem['tipo_nome']})")
+        st.subheader(f"Análise para Barragem (Tipo: {tipo_barragem['tipo_nome']})")
         
-        if st.button("🔍 Pesquisar modo de falha", type="primary"):
+        if st.button("Pesquisar modo de falha", type="primary"):
             with st.spinner("Processando critérios de análise..."):
                 # 1. Obter modos de falha associados ao tipo desta barragem (incluindo imagem e descrição)
                 modos_falha = pd.read_sql(f"""
@@ -3205,28 +3205,21 @@ def pagina_principal():
         chaves_opcoes = list(opcoes_barragens.keys())
         idx_atual = chaves_opcoes.index(barragem_selecionada) if barragem_selecionada in chaves_opcoes else 0
 
-        col1, col2 = st.columns([3, 1])
-        with col1:
-            nova_barragem = st.selectbox(
-                t("dam_select_label"),
-                options=chaves_opcoes,
-                format_func=lambda x: opcoes_barragens.get(x, t("dam_select_placeholder")),
-                index=idx_atual
-            )
+        nova_barragem = st.selectbox(
+            t("dam_select_label"),
+            options=chaves_opcoes,
+            format_func=lambda x: opcoes_barragens.get(x, t("dam_select_placeholder")),
+            index=idx_atual,
+            key="select_barragem_analise_ativa",
+        )
 
-        with col2:
-            st.write("")
-            st.write("")
-            if st.button(t("dam_save_selection"), type="primary"):
-                if nova_barragem:
-                    try:
-                        definir_barragem_analise_escopo(role, usuario_id, int(nova_barragem))
-                        st.success(t("dam_current", name=opcoes_barragens[nova_barragem]))
-                        st.rerun()
-                    except PermissionError:
-                        st.error(t("dam_unauthorized"))
-                else:
-                    st.error(t("dam_none_selected"))
+        # Ativa automaticamente a barragem assim que for selecionada (sem botão extra)
+        if nova_barragem and nova_barragem != barragem_selecionada:
+            try:
+                definir_barragem_analise_escopo(role, usuario_id, int(nova_barragem))
+                st.rerun()
+            except PermissionError:
+                st.error(t("dam_unauthorized"))
 
         if barragem_analise:
             with st.expander("📝 Editar Barragem"):
@@ -3441,7 +3434,7 @@ def menu_lateral():
             f'</div>',
             unsafe_allow_html=True,
         )
-        st.caption(f"👤 {nome_utilizador}")
+        st.caption(f"{nome_utilizador}")
         render_seletor_idioma("sidebar")
 
         redirecionar = None
