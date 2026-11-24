@@ -97,7 +97,7 @@ from rbac import (
     submeter_alteracao_configuracao, contar_propostas_pendentes,
     listar_propostas_configuracao, aprovar_proposta_configuracao, rejeitar_proposta_configuracao,
 )
-from i18n import get_text, SUPPORTED_LANGS
+from i18n import get_text, translate_term, SUPPORTED_LANGS
 from theme_desproj import aplicar_tema_desproj
 
 # Configuração da página e tema visual alinhado a https://www.desproj.com/
@@ -112,6 +112,11 @@ def obter_idioma() -> str:
 
 def t(key: str, **kwargs) -> str:
     return get_text(key, lang=obter_idioma(), **kwargs)
+
+
+def tt(text) -> str:
+    """Traduz termos técnicos de catálogo da base de dados consoante o idioma ativo."""
+    return translate_term(text, lang=obter_idioma())
 
 
 def render_seletor_idioma(key_suffix: str = "sidebar") -> None:
@@ -2139,56 +2144,43 @@ def gerenciar_tipos_barragem():
 
 
 def editar_barragem(barragem):
-    """Formulário para edição de barragem existente"""
+    """Formulário para edição de barragem existente (bilingue PT/EN)."""
     with st.form("editar_barragem_form"):
-        nome = st.text_input("Nome", value=barragem[2])
+        nome = st.text_input(t("dam_name_label"), value=barragem[2])
 
-
-        # Lista de tipos de barragem: (id, nome)
+        # Lista de tipos de barragem: (id, usuario_id, nome, ...)
         tipos = obter_tipos_barragem_cached()
-
-        # Criar dicionário nome -> id
-        opcoes = {t[2]: t[0] for t in tipos}
-
-        # Criar dicionário inverso id -> nome (para uso no valor inicial)
-        id_para_nome = {t[0]: t[2] for t in tipos}
-
-        # tipo_id previamente armazenado
-    
+        id_para_nome = {row[0]: tt(row[2]) for row in tipos}
+        ids_tipos = [row[0] for row in tipos]
         tipo_id_atual = barragem[3]
+        idx_tipo = ids_tipos.index(tipo_id_atual) if tipo_id_atual in ids_tipos else 0
 
-        # Obter nome correspondente ao ID atual (ou "" se não encontrado)
-        tipo_nome_atual = id_para_nome.get(tipo_id_atual, "")
-
-        # Selectbox que mostra o nome e armazena o ID
-        tipo_nome = st.selectbox(
-            "Tipo de Barragem*",
-            options=list(opcoes.keys()),
-            index=list(opcoes.keys()).index(tipo_nome_atual) if tipo_nome_atual in opcoes else 0,
-            help="Selecione o tipo construtivo da barragem"
+        tipo_id = st.selectbox(
+            t("dam_type_label"),
+            options=ids_tipos,
+            index=idx_tipo,
+            format_func=lambda x: id_para_nome.get(x, str(x)),
+            help=t("dam_type_help"),
         )
 
-        # Recuperar o tipo_id correspondente ao nome selecionado
-        tipo_id = opcoes[tipo_nome]
+        localizacao = st.text_input(t("dam_location_label"), value=barragem[4])
+        altura = st.number_input(t("dam_height_label"), value=barragem[5], min_value=0.0)
+        comprimento = st.number_input(t("dam_length_label"), value=barragem[6], min_value=0.0)
+        rel_cordaaltura = st.number_input(t("dam_chord_ratio_label"), value=barragem[7], min_value=0.0)
 
-        localizacao = st.text_input("Localização", value=barragem[4])
-        altura = st.number_input("Altura (m)", value=barragem[5], min_value=0.0)
-        comprimento = st.number_input("Comprimento (m)", value=barragem[6], min_value=0.0)
-        rel_cordaaltura = st.number_input("Relação Corda/Altura", value=barragem[7], min_value=0.0)
-        
         col1, col2, col3 = st.columns(3)
         with col2:
-            submitted1 = st.form_submit_button("🗑️ Excluir")
+            submitted1 = st.form_submit_button(t("dam_delete_btn"))
             if submitted1:
                 try:
                     excluir_barragem_escopo(obter_perfil_atual(), st.session_state['usuario_id'], barragem[0])
-                    st.success("Barragem excluída com sucesso!")
+                    st.success(t("dam_deleted_ok"))
                     st.rerun()
                 except PermissionError:
                     st.error(t("dam_unauthorized"))
 
         with col3:
-            submitted = st.form_submit_button("💾 Guardar Alterações")
+            submitted = st.form_submit_button(t("dam_save_btn"))
             if submitted:
                 try:
                     atualizar_barragem_escopo(
@@ -2202,7 +2194,7 @@ def editar_barragem(barragem):
                         comprimento,
                         rel_cordaaltura,
                     )
-                    st.success("Barragem atualizada com sucesso!")
+                    st.success(t("dam_updated_ok"))
                     st.rerun()
                 except PermissionError:
                     st.error(t("dam_unauthorized"))
@@ -2328,45 +2320,45 @@ def email_valido(email):
 
 # ---------- Páginas ----------
 def pagina_cadastro():
-    """Página de cadastro de novos usuários"""
-    st.subheader("📝 Cadastro de Novo Usuário")
+    """Página de registo de novos utilizadores (bilingue PT/EN)."""
+    st.subheader(t("reg_title"))
     proximo_codigo = obter_proximo_codigo_usuario()
 
     with st.form("cadastro_form"):
         col1, col2 = st.columns(2)
         with col1:
-            st.text_input("Código do Usuário", value=proximo_codigo, disabled=True)
-            nome = st.text_input("Nome Completo", max_chars=100)
-            funcao = st.text_input("Função/Cargo", max_chars=50)
-            organizacao = st.text_input("Organização", max_chars=100)
+            st.text_input(t("reg_code"), value=proximo_codigo, disabled=True)
+            nome = st.text_input(t("reg_name"), max_chars=100)
+            funcao = st.text_input(t("reg_role_job"), max_chars=50)
+            organizacao = st.text_input(t("reg_org"), max_chars=100)
 
         with col2:
-            email = st.text_input("E-mail", max_chars=100)
-            senha = st.text_input("Palavra-passe", type="password", max_chars=50)
-            confirmar_senha = st.text_input("Confirmar Palavra-passe", type="password", max_chars=50)
+            email = st.text_input(t("email_label"), max_chars=100)
+            senha = st.text_input(t("password_label"), type="password", max_chars=50)
+            confirmar_senha = st.text_input(t("confirm_password_label"), type="password", max_chars=50)
             eh_super_admin = bool(st.session_state.get("logado")) and obter_perfil_atual() == ROLE_SUPER_ADMIN
             if eh_super_admin:
-                ativo = st.selectbox("Utilizador Ativo?", ["sim", "não"])
+                ativo = st.selectbox(t("reg_active"), ["sim", "não"])
             else:
                 ativo = "sim"
 
-        enviar = st.form_submit_button("Cadastrar")
+        enviar = st.form_submit_button(t("reg_submit"), type="primary")
 
         if enviar:
             if not email_valido(email):
-                st.error("❌ Email inválido.")
+                st.error(t("reg_invalid_email"))
             elif senha != confirmar_senha:
-                st.error("❌ As senhas não coincidem.")
+                st.error(t("reg_pwd_mismatch"))
             elif len(senha) < 6:
-                st.error("❌ A senha deve ter pelo menos 6 caracteres.")
+                st.error(t("reg_pwd_short"))
             elif email_existe(email):
-                st.warning("⚠️ Este email já está cadastrado.")
+                st.warning(t("reg_email_exists"))
             else:
                 if criar_usuario(proximo_codigo, nome, email, funcao, organizacao, senha, ativo):
-                    st.success(f"✅ Usuário '{nome}' cadastrado com sucesso!")
+                    st.success(t("reg_success", name=nome))
                     st.balloons()
                 else:
-                    st.error("❌ Erro ao cadastrar usuário.")
+                    st.error(t("reg_error"))
 
 def pagina_admin_usuarios():
     """Página de administração de utilizadores e perfis RBAC (apenas Usuário Supremo)."""
@@ -2917,7 +2909,7 @@ def identificar_modo_falha_provavel(barragem_id):
     3. Zona da anomalia observada vs zonas associadas às anomalias do sistema
     4. Peso das anomalias para cada modo de falha
     """
-    if not st.button("Pesquisar modo de falha", type="primary"):
+    if not st.button(t("fm_analyze_btn"), type="primary"):
         return
 
     role = obter_perfil_atual()
@@ -2936,7 +2928,7 @@ def identificar_modo_falha_provavel(barragem_id):
         ).iloc[0, 0]
 
         if count_anomalias == 0:
-            st.info("Adicione pelo menos uma anomalia observada para identificar o modo de falha provável.")
+            st.info(t("fm_need_obs"))
             return
 
         # Obter o tipo da barragem em análise
@@ -2948,10 +2940,11 @@ def identificar_modo_falha_provavel(barragem_id):
             conn
         ).iloc[0]
 
-        st.subheader(f"Análise para Barragem (Tipo: {tipo_barragem['tipo_nome']})")
+        dam_type_label = tt(tipo_barragem['tipo_nome'])
+        st.subheader(t("fm_header_dam_type", dam_type=dam_type_label))
 
         if True:
-            with st.spinner("Processando critérios de análise..."):
+            with st.spinner(t("fm_spinner")):
                 # 1. Obter modos de falha associados ao tipo desta barragem (incluindo imagem e descrição)
                 modos_falha = pd.read_sql(f"""
                     SELECT mf.id, mf.nome, mf.descricao, mf.image_path 
@@ -2961,7 +2954,7 @@ def identificar_modo_falha_provavel(barragem_id):
                 """, conn)
                 
                 if modos_falha.empty:
-                    st.warning("⚠️ Nenhum modo de falha definido para este tipo de barragem")
+                    st.warning(t("fm_none_defined"))
                     return
                 
                 # 2. Obter todas as anomalias observadas para esta barragem
@@ -3086,29 +3079,31 @@ def identificar_modo_falha_provavel(barragem_id):
                 # Exibir resultados
                 max_compat = max((r['compatibilidade'] for r in resultados), default=0.0)
                 if max_compat > 0:
-                    st.success(f"🎯 Resultados da Análise ({len(resultados)} modos de falha avaliados para este tipo de barragem)")
+                    st.success(t("fm_results_ok", count=len(resultados)))
                 else:
-                    st.warning(f"⚠️ Nenhum dos {len(resultados)} modos de falha cadastrados atingiu correspondência completa (tipo + zona + material) com as anomalias observadas.")
+                    st.warning(t("fm_results_zero", count=len(resultados)))
 
                 # Gráfico de compatibilidade (todos os modos de falha cadastrados para o tipo de barragem)
+                col_fm = t("fm_axis_fm")
+                col_compat = t("fm_axis_compat")
                 df_plot = pd.DataFrame({
-                    'Modo de Falha': [r['modo_falha_nome'] for r in resultados],
-                    'Compatibilidade (%)': [r['compatibilidade'] for r in resultados]
+                    col_fm: [tt(r['modo_falha_nome']) for r in resultados],
+                    col_compat: [r['compatibilidade'] for r in resultados]
                 })
 
                 # Cores coerentes com a identidade desproj consoante o nível de compatibilidade
                 cores_barras = [
                     "#943f08" if v >= 70 else ("#b8520e" if v >= 35 else ("#d99b26" if v > 0 else "#d6cec5"))
-                    for v in df_plot['Compatibilidade (%)']
+                    for v in df_plot[col_compat]
                 ]
 
                 fig = px.bar(
                     df_plot,
-                    x='Modo de Falha',
-                    y='Compatibilidade (%)',
-                    text='Compatibilidade (%)',
-                    title=f"Compatibilidade com Modo de Falha — Todos os {len(resultados)} modos cadastrados ({tipo_barragem['tipo_nome']})",
-                    labels={'Compatibilidade (%)': 'Compatibilidade (%)'},
+                    x=col_fm,
+                    y=col_compat,
+                    text=col_compat,
+                    title=t("fm_chart_title", count=len(resultados), dam_type=dam_type_label),
+                    labels={col_compat: col_compat},
                     height=620,
                 )
                 fig.update_traces(
@@ -3125,7 +3120,7 @@ def identificar_modo_falha_provavel(barragem_id):
                     bargap=0.25,
                     xaxis_tickangle=-40,
                     xaxis=dict(tickfont=dict(size=12)),
-                    yaxis=dict(range=[0, 112], dtick=20, title="Compatibilidade (%)", gridcolor="#ece5dd"),
+                    yaxis=dict(range=[0, 112], dtick=20, title=col_compat, gridcolor="#ece5dd"),
                     margin=dict(l=55, r=30, t=65, b=190),
                     plot_bgcolor="#ffffff",
                     paper_bgcolor="rgba(0,0,0,0)",
@@ -3133,10 +3128,11 @@ def identificar_modo_falha_provavel(barragem_id):
                 st.plotly_chart(fig, use_container_width=True)
 
                 # Tabela detalhada com imagens e descrições
-                st.subheader(f"📊 Detalhes da Análise ({len(resultados)} Modos de Falha)")
+                st.subheader(t("fm_details_title", count=len(resultados)))
 
                 for res in resultados:
-                    with st.expander(f"{res['modo_falha_nome']} ({res['compatibilidade']:.1f}%)"):
+                    mf_label = tt(res['modo_falha_nome'])
+                    with st.expander(f"{mf_label} ({res['compatibilidade']:.1f}%)"):
                         col1, col2 = st.columns([1, 2])
 
                         with col1:
@@ -3145,35 +3141,53 @@ def identificar_modo_falha_provavel(barragem_id):
                                 try:
                                     st.image(
                                         str(img_res),
-                                        caption=f"Modo de Falha: {res['modo_falha_nome']}",
+                                        caption=t("fm_img_caption", name=mf_label),
                                         use_container_width=True
                                     )
                                 except Exception:
-                                    st.warning("Não foi possível apresentar a imagem deste modo de falha.")
+                                    st.warning(t("fm_no_img"))
                             else:
-                                st.warning("Sem imagem disponível")
+                                st.warning(t("fm_no_img"))
 
                         with col2:
-                            st.write("**Descrição:**")
-                            st.write(res['modo_falha_descricao'] or "Sem descrição disponível")
+                            st.write(f"**{t('fm_desc_label')}**")
+                            st.write(res['modo_falha_descricao'] or t("fm_no_desc"))
 
                         st.write(
-                            f"**Compatibilidade:** {res['compatibilidade']:.1f}% "
-                            f"(Peso compatível: {res['contribuicao_total']:.2f} / Peso total do modo: {res['peso_total_modo']:.2f})"
+                            t(
+                                "fm_compat_summary",
+                                compat=res['compatibilidade'],
+                                matched=res['contribuicao_total'],
+                                total=res['peso_total_modo'],
+                            )
                         )
 
                         if res['anomalias_contribuintes']:
-                            df_contrib = pd.DataFrame(res['anomalias_contribuintes'])
+                            df_contrib = pd.DataFrame([
+                                {
+                                    'anomalia_obs_nome': tt(item['anomalia_obs_nome']),
+                                    'anomalia_sistema_nome': tt(item['anomalia_sistema_nome']),
+                                    'material': tt(item['material']),
+                                    'zona': tt(item['zona']),
+                                    'peso': item['peso'],
+                                    'contribuicao': item['contribuicao'],
+                                }
+                                for item in res['anomalias_contribuintes']
+                            ])
                             st.dataframe(
                                 df_contrib[['anomalia_obs_nome', 'anomalia_sistema_nome',
                                           'material', 'zona', 'peso', 'contribuicao']],
                                 column_config={
+                                    'anomalia_obs_nome': t("fm_col_obs"),
+                                    'anomalia_sistema_nome': t("fm_col_sys"),
+                                    'material': t("fm_col_mat"),
+                                    'zona': t("fm_col_zone"),
                                     'contribuicao': st.column_config.NumberColumn(
-                                        'Peso Contabilizado',
+                                        t("fm_col_contrib"),
                                         format="%.2f"
                                     ),
                                     'peso': st.column_config.NumberColumn(
-                                        'Peso Original',
+                                        t("fm_col_weight"),
                                         format="%.2f"
                                     )
                                 },
@@ -3181,7 +3195,7 @@ def identificar_modo_falha_provavel(barragem_id):
                                 use_container_width=True
                             )
                         else:
-                            st.info("Sem anomalias observadas compatíveis com todos os critérios (tipo + zona + material) deste modo de falha.")
+                            st.info(t("fm_no_matching_obs"))
     
     except Exception as e:
         st.error(f"⛔ Erro durante a análise: {str(e)}")
@@ -3250,91 +3264,92 @@ def pagina_principal():
                 st.error(t("dam_unauthorized"))
 
         if barragem_analise:
-            with st.expander("📝 Editar Barragem"):
+            with st.expander(t("dam_edit_expander")):
                 editar_barragem(barragem_analise)
 
             # === ANOMALIAS ===
-            st.subheader("Anomalias Observadas")
+            st.subheader(t("obs_section_title"))
             anomalias = obter_anomalias_barragem(barragem_analise[0])
-            tab_listar, tab_adicionar, tab_editar = st.tabs(["Listar Anomalias", "Adicionar Anomalia", "Editar/Excluir"])
+            tab_listar, tab_adicionar, tab_editar = st.tabs([t("obs_tab_list"), t("obs_tab_add"), t("obs_tab_edit")])
 
             with tab_listar:
-                st.write("### Lista de Anomalias Registadas")
+                st.write(f"### {t('obs_list_heading')}")
                 if anomalias:
                     for anomalia in anomalias:
-                        # with st.expander(f"Anomalia #{anomalia[0]} - {anomalia[3]}"):
-                        with st.expander(f"Anomalia #{anomalia[0]} - {anomalia[3]} - {anomalia[5]}"):
+                        tipo_lbl = tt(anomalia[3])
+                        zona_lbl = tt(anomalia[5])
+                        mat_lbl = tt(anomalia[7])
+                        with st.expander(f"{t('obs_item_prefix')} #{anomalia[0]} - {tipo_lbl} - {zona_lbl}"):
                             cols = st.columns([1, 3])
                             with cols[0]:
                                 img_obs = resolver_caminho_arquivo(anomalia[9])
                                 if img_obs:
                                     try:
-                                        st.image(str(img_obs), caption="Imagem da anomalia", width=200)
+                                        st.image(str(img_obs), caption=t("obs_img_caption"), width=200)
                                     except Exception:
-                                        st.write("⚠️ Imagem indisponível")
+                                        st.write(t("obs_img_unavailable"))
                             with cols[1]:
-                                st.write(f"**Tipo:** {anomalia[3]}")
-                                st.write(f"**Zona:** {anomalia[5]}")
-                                st.write(f"**Material:** {anomalia[7]}")
-                                st.write(f"**Data:** {anomalia[15]}")
-                                st.write(f"**Descrição:** {anomalia[8]}")
+                                st.write(f"**{t('obs_field_type')}:** {tipo_lbl}")
+                                st.write(f"**{t('obs_field_zone')}:** {zona_lbl}")
+                                st.write(f"**{t('obs_field_material')}:** {mat_lbl}")
+                                st.write(f"**{t('obs_field_date')}:** {anomalia[15]}")
+                                st.write(f"**{t('obs_field_desc')}:** {anomalia[8]}")
                                 fontes = []
-                                if anomalia[10]: fontes.append("🔍 Inspeção Visual")
-                                if anomalia[11]: fontes.append("📊 Instrumentação")
-                                if anomalia[12]: fontes.append("🚁 Drones")
-                                if anomalia[13]: fontes.append("🛰️ InSAR")
-                                if anomalia[14]: fontes.append("🌍 Satélite")
-                                st.write("**Fontes de detecção:**", " | ".join(fontes) if fontes else "Nenhuma")
+                                if anomalia[10]: fontes.append(t("obs_src_visual"))
+                                if anomalia[11]: fontes.append(t("obs_src_instr"))
+                                if anomalia[12]: fontes.append(t("obs_src_drones"))
+                                if anomalia[13]: fontes.append(t("obs_src_insar"))
+                                if anomalia[14]: fontes.append(t("obs_src_sat"))
+                                st.write(f"**{t('obs_field_sources')}:**", " | ".join(fontes) if fontes else t("obs_source_none"))
 
                     st.markdown("---")
-                    st.subheader("🎯 Identificação do modo de falha provável")
+                    st.subheader(t("fm_section_title"))
                     identificar_modo_falha_provavel(barragem_analise[0])
 
                 else:
-                    st.info("Nenhuma anomalia registrada para esta barragem")
+                    st.info(t("obs_empty"))
 
             with tab_adicionar:
-                st.write("### Registrar nova anomalia")
+                st.write(f"### {t('obs_add_heading')}")
                 with st.form("form_adicionar_anomalia", clear_on_submit=True):
-                    # ✅ Sem filtro por usuário
                     tipos_anomalia = obter_tipos_anomalia()
                     zonas_barragem = obter_tipos_zonas_bar()
                     materiais = obter_tipos_materiais()
 
                     if not tipos_anomalia:
-                        st.error("⚠️ Nenhum tipo de anomalia cadastrado. Cadastre tipos de anomalia primeiro.")
+                        st.error(t("obs_empty"))
                         st.stop()
 
                     if not zonas_barragem:
-                        st.error("⚠️ Nenhuma zona de barragem disponível.")
+                        st.error(t("obs_empty"))
                         st.stop()
 
                     if not materiais:
-                        st.error("⚠️ Nenhum material cadastrado. Cadastre tipos de materiais primeiro.")
+                        st.error(t("obs_empty"))
                         st.stop()
 
-                    tipo_selecionado = st.selectbox("Tipo de Anomalia*", options=tipos_anomalia, format_func=lambda x: x[1])
-                    zona_selecionada = st.selectbox("Zona da Barragem*", options=zonas_barragem, format_func=lambda x: f"{x[1]} - {x[2]}" if x[2] else x[1])
-                    material_selecionado = st.selectbox("Material*", options=materiais, format_func=lambda x: x[1])
-                    descricao = st.text_area("Descrição Detalhada*")
-                    data_observacao = st.date_input("Data de Observação*")
-                    image_path = st.file_uploader("Imagem da Anomalia (opcional)", type=['png', 'jpg', 'jpeg'])
+                    tipo_selecionado = st.selectbox(t("obs_select_type"), options=tipos_anomalia, format_func=lambda x: tt(x[1]))
+                    zona_selecionada = st.selectbox(t("obs_select_zone"), options=zonas_barragem, format_func=lambda x: tt(x[1]))
+                    material_selecionado = st.selectbox(t("obs_select_material"), options=materiais, format_func=lambda x: tt(x[1]))
+                    descricao = st.text_area(t("obs_desc_label"))
+                    data_observacao = st.date_input(t("obs_date_label"))
+                    image_path = st.file_uploader(t("obs_img_upload"), type=['png', 'jpg', 'jpeg'])
 
-                    st.write("**Fontes de Detecção** (selecione pelo menos uma)*")
+                    st.write(t("obs_sources_prompt"))
                     col1, col2 = st.columns(2)
                     with col1:
-                        fonte_visual = st.checkbox("Inspeção Visual")
-                        fonte_instrumentacao = st.checkbox("Instrumentação")
-                        fonte_drones = st.checkbox("Drones")
+                        fonte_visual = st.checkbox(t("obs_src_visual"))
+                        fonte_instrumentacao = st.checkbox(t("obs_src_instr"))
+                        fonte_drones = st.checkbox(t("obs_src_drones"))
                     with col2:
-                        fonte_insar = st.checkbox("InSAR")
-                        fonte_satellite = st.checkbox("Satélite")
+                        fonte_insar = st.checkbox(t("obs_src_insar"))
+                        fonte_satellite = st.checkbox(t("obs_src_sat"))
 
-                    if st.form_submit_button("✅ Registrar Anomalia"):
+                    if st.form_submit_button(t("obs_add_btn"), type="primary"):
                         if not descricao.strip():
-                            st.error("A descrição é obrigatória")
+                            st.error(t("obs_desc_required"))
                         elif not any([fonte_visual, fonte_instrumentacao, fonte_drones, fonte_insar, fonte_satellite]):
-                            st.error("Selecione pelo menos uma fonte de detecção")
+                            st.error(t("obs_source_required"))
                         else:
                             img_path_str = salvar_imagem_anomalia(image_path, barragem_analise[0]) if image_path else None
                             sucesso = registrar_anomalia(
@@ -3352,70 +3367,69 @@ def pagina_principal():
                                 data_observacao=data_observacao.strftime('%Y-%m-%d')
                             )
                             if sucesso:
-                                st.success("Anomalia registrada com sucesso!")
+                                st.success(t("obs_added_ok"))
                                 st.rerun()
 
             with tab_editar:
-                st.write("### Editar ou Excluir Anomalias")
+                st.write(f"### {t('obs_edit_heading')}")
                 if anomalias:
                     anomalia_selecionada = st.selectbox(
-                        "Selecione a anomalia para edição/exclusão",
+                        t("obs_select_edit"),
                         options=anomalias,
-                        format_func=lambda x: f"Anomalia #{x[0]} - {x[3]} ({x[15]})"
+                        format_func=lambda x: f"{t('obs_item_prefix')} #{x[0]} - {tt(x[3])} ({x[15]})"
                     )
 
                     if anomalia_selecionada:
                         col_excluir, _ = st.columns([1, 3])
                         with col_excluir:
-                            if st.button("🗑️ Excluir Anomalia", type="secondary"):
+                            if st.button(t("obs_delete_btn"), type="secondary"):
                                 if st.session_state.get('confirmar_exclusao') != anomalia_selecionada[0]:
                                     st.session_state['confirmar_exclusao'] = anomalia_selecionada[0]
-                                    st.warning("⚠️ Clique novamente para confirmar a exclusão")
+                                    st.warning(t("obs_delete_confirm"))
                                 else:
                                     if excluir_anomalia(anomalia_selecionada[0]):
-                                        st.success("Anomalia excluída com sucesso!")
+                                        st.success(t("obs_deleted_ok"))
                                         del st.session_state['confirmar_exclusao']
                                         st.rerun()
                                     else:
-                                        st.error("Erro ao excluir anomalia")
+                                        st.error(t("obs_delete_err"))
 
                         with st.form("form_editar_anomalia"):
-                            st.write("#### Editar Anomalia")
+                            st.write(f"#### {t('obs_edit_form_heading')}")
 
-                            # ✅ Sem filtro por usuário
                             tipos_anomalia = obter_tipos_anomalia()
                             zonas_barragem = obter_tipos_zonas_bar()
                             materiais = obter_tipos_materiais()
 
-                            tipo_atual = next((t for t in tipos_anomalia if t[0] == anomalia_selecionada[2]), tipos_anomalia[0])
+                            tipo_atual = next((item for item in tipos_anomalia if item[0] == anomalia_selecionada[2]), tipos_anomalia[0])
                             zona_atual = next((z for z in zonas_barragem if z[0] == anomalia_selecionada[4]), zonas_barragem[0])
                             material_atual = next((m for m in materiais if m[0] == anomalia_selecionada[6]), materiais[0])
 
-                            novo_tipo = st.selectbox("Tipo de Anomalia", options=tipos_anomalia, format_func=lambda x: x[1], index=tipos_anomalia.index(tipo_atual))
-                            nova_zona = st.selectbox("Zona da Barragem", options=zonas_barragem, format_func=lambda x: f"{x[1]} - {x[2]}" if x[2] else x[1], index=zonas_barragem.index(zona_atual))
-                            novo_material = st.selectbox("Material", options=materiais, format_func=lambda x: x[1], index=materiais.index(material_atual))
-                            nova_descricao = st.text_area("Descrição detalhada", value=anomalia_selecionada[8] or "")
+                            novo_tipo = st.selectbox(t("obs_select_type"), options=tipos_anomalia, format_func=lambda x: tt(x[1]), index=tipos_anomalia.index(tipo_atual))
+                            nova_zona = st.selectbox(t("obs_select_zone"), options=zonas_barragem, format_func=lambda x: tt(x[1]), index=zonas_barragem.index(zona_atual))
+                            novo_material = st.selectbox(t("obs_select_material"), options=materiais, format_func=lambda x: tt(x[1]), index=materiais.index(material_atual))
+                            nova_descricao = st.text_area(t("obs_desc_label"), value=anomalia_selecionada[8] or "")
                             try:
                                 data_atual = datetime.strptime(anomalia_selecionada[15], '%Y-%m-%d').date()
-                            except:
+                            except Exception:
                                 data_atual = datetime.now().date()
-                            nova_data = st.date_input("Data de Observação", value=data_atual)
+                            nova_data = st.date_input(t("obs_date_label"), value=data_atual)
 
-                            st.write("Fontes de Detecção:")
+                            st.write(f"{t('obs_field_sources')}:")
                             col1, col2 = st.columns(2)
                             with col1:
-                                fonte_visual = st.checkbox("Inspeção Visual", value=bool(anomalia_selecionada[10]))
-                                fonte_instrumentacao = st.checkbox("Instrumentação", value=bool(anomalia_selecionada[11]))
-                                fonte_drones = st.checkbox("Drones", value=bool(anomalia_selecionada[12]))
+                                fonte_visual = st.checkbox(t("obs_src_visual"), value=bool(anomalia_selecionada[10]))
+                                fonte_instrumentacao = st.checkbox(t("obs_src_instr"), value=bool(anomalia_selecionada[11]))
+                                fonte_drones = st.checkbox(t("obs_src_drones"), value=bool(anomalia_selecionada[12]))
                             with col2:
-                                fonte_insar = st.checkbox("InSAR", value=bool(anomalia_selecionada[13]))
-                                fonte_satellite = st.checkbox("Satélite", value=bool(anomalia_selecionada[14]))
+                                fonte_insar = st.checkbox(t("obs_src_insar"), value=bool(anomalia_selecionada[13]))
+                                fonte_satellite = st.checkbox(t("obs_src_sat"), value=bool(anomalia_selecionada[14]))
 
-                            if st.form_submit_button("💾 Salvar Alterações"):
+                            if st.form_submit_button(t("dam_save_btn"), type="primary"):
                                 if not nova_descricao.strip():
-                                    st.error("A descrição é obrigatória")
+                                    st.error(t("obs_desc_required"))
                                 elif not any([fonte_visual, fonte_instrumentacao, fonte_drones, fonte_insar, fonte_satellite]):
-                                    st.error("Selecione pelo menos uma fonte de detecção")
+                                    st.error(t("obs_source_required"))
                                 else:
                                     sucesso = atualizar_anomalia(
                                         anomalia_id=anomalia_selecionada[0],
@@ -3432,12 +3446,12 @@ def pagina_principal():
                                         data_observacao=nova_data.strftime('%Y-%m-%d')
                                     )
                                     if sucesso:
-                                        st.success("Anomalia atualizada com sucesso!")
+                                        st.success(t("obs_updated_ok"))
                                         st.rerun()
                                     else:
-                                        st.error("Erro ao atualizar anomalia")
+                                        st.error(t("obs_update_err"))
                 else:
-                    st.info("Nenhuma anomalia registrada para esta barragem")
+                    st.info(t("obs_empty"))
 
     else:
         st.info(t("dam_empty_cta"))

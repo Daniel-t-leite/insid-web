@@ -265,6 +265,19 @@ class TestInsidRbacAndWorkflow(unittest.TestCase):
         self.assertNotIn("⚙️Configurações", app_text)
         self.assertNotIn("Barragem excluida", app_text)
 
+        # Garantir 100% de cobertura de tradução EN para todos os 86 termos técnicos de inSID.db
+        seed_conn = sqlite3.connect(str(ROOT_DIR / "inSID.db"))
+        try:
+            faltando = []
+            for tabela in ("tipos_barragem", "tipos_zonas_bar", "tipos_materiais", "tipo_anomalia", "tipo_modo_falha", "modos_falha"):
+                for (nome,) in seed_conn.execute(f'SELECT nome FROM "{tabela}"'):
+                    chave = str(nome).strip().lower()
+                    if chave not in i18n.CATALOG_EN:
+                        faltando.append(f"{tabela}: {nome}")
+            self.assertEqual(faltando, [], f"Termos sem tradução EN em CATALOG_EN: {faltando}")
+        finally:
+            seed_conn.close()
+
 
 if __name__ == "__main__":
     unittest.main()
