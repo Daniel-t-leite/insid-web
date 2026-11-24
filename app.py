@@ -3070,17 +3070,40 @@ def identificar_modo_falha_provavel(barragem_id):
                     'Compatibilidade (%)': [r['compatibilidade'] for r in resultados]
                 })
 
+                # Cores coerentes com a identidade desproj consoante o nível de compatibilidade
+                cores_barras = [
+                    "#943f08" if v >= 70 else ("#b8520e" if v >= 35 else ("#d99b26" if v > 0 else "#d6cec5"))
+                    for v in df_plot['Compatibilidade (%)']
+                ]
+
                 fig = px.bar(
                     df_plot,
                     x='Modo de Falha',
                     y='Compatibilidade (%)',
-                    color='Modo de Falha',
                     text='Compatibilidade (%)',
                     title=f"Compatibilidade com Modo de Falha — Todos os {len(resultados)} modos cadastrados ({tipo_barragem['tipo_nome']})",
-                    labels={'Compatibilidade (%)': 'Compatibilidade (%)'}
+                    labels={'Compatibilidade (%)': 'Compatibilidade (%)'},
+                    height=620,
                 )
-                fig.update_traces(texttemplate='%{text:.1f}%', textposition='outside')
-                fig.update_layout(showlegend=False, xaxis_tickangle=-35, yaxis=dict(range=[0, 110]))
+                fig.update_traces(
+                    marker_color=cores_barras,
+                    marker_line_color="#5c2805",
+                    marker_line_width=0.6,
+                    texttemplate='%{text:.1f}%',
+                    textposition='outside',
+                    textfont=dict(size=12, color="#231a14"),
+                    cliponaxis=False,
+                )
+                fig.update_layout(
+                    showlegend=False,
+                    bargap=0.25,
+                    xaxis_tickangle=-40,
+                    xaxis=dict(tickfont=dict(size=12)),
+                    yaxis=dict(range=[0, 112], dtick=20, title="Compatibilidade (%)", gridcolor="#ece5dd"),
+                    margin=dict(l=55, r=30, t=65, b=190),
+                    plot_bgcolor="#ffffff",
+                    paper_bgcolor="rgba(0,0,0,0)",
+                )
                 st.plotly_chart(fig, use_container_width=True)
 
                 # Tabela detalhada com imagens e descrições
