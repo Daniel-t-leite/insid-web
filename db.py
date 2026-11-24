@@ -94,6 +94,71 @@ def _migrar_seed_local_para_turso_se_vazio(conn) -> None:
             )
 
 
+def _sincronizar_catalogo_seed_para_turso(conn) -> None:
+    """
+    Sincroniza (uma única vez, de forma idempotente e segura com foreign_keys=ON)
+    os modos de falha, tipos, zonas, anomalias e associações mais recentes de inSID.db
+    para uma base Turso já existente, sem apagar dados de utilizadores ou barragens.
+    """
+    if not usando_turso() or not DB_PATH.exists():
+        return
+
+    cur = conn.cursor()
+    cur.execute(
+        "CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT)"
+    )
+    ja_aplicado = cur.execute(
+        "SELECT 1 FROM schema_meta WHERE key = 'catalog_sync_insid_platform_v2'"
+    ).fetchone()
+    if ja_aplicado:
+        return
+
+    tabelas_catalogo_ordenadas = [
+        "tipos_barragem",
+        "tipos_materiais",
+        "tipos_zonas_bar",
+        "tipo_modo_falha",
+        "tipo_anomalia",
+        "modos_falha",
+        "modos_falha_tipo_barragem",
+        "anomalias",
+        "anomalia_zona",
+        "anomalia_tipo_material",
+    ]
+    with closing(sqlite3.connect(str(DB_PATH))) as local_conn:
+        lcur = local_conn.cursor()
+        for tabela in tabelas_catalogo_ordenadas:
+            existe = lcur.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (tabela,)
+            ).fetchone()
+            if not existe:
+                continue
+            rows = lcur.execute(f'SELECT * FROM "{tabela}"').fetchall()
+            if not rows:
+                continue
+            cols = [d[0] for d in lcur.description]
+            placeholders = ", ".join(["?"] * len(cols))
+            col_list = ", ".join(f'"{c}"' for c in cols)
+            cur.executemany(
+                f'INSERT OR IGNORE INTO "{tabela}" ({col_list}) VALUES ({placeholders})',
+                rows,
+            )
+
+        # Atualizar nomes, descrições e imagens dos modos de falha já existentes (ex.: IDs 17 e 18)
+        mfs_seed = lcur.execute(
+            "SELECT nome, descricao, referencia_tecnica, image_path, id FROM modos_falha"
+        ).fetchall()
+        if mfs_seed:
+            cur.executemany(
+                "UPDATE modos_falha SET nome = ?, descricao = ?, referencia_tecnica = ?, image_path = ? WHERE id = ?",
+                mfs_seed,
+            )
+
+    cur.execute(
+        "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('catalog_sync_insid_platform_v2', 'done')"
+    )
+
+
 def _criar_tabelas_schema(cursor) -> None:
     """Cria todas as tabelas com schema compatível com SQLite local e Turso (foreign_keys=ON)."""
     cursor.execute("""
@@ -331,6 +396,9 @@ def inicializar_bd():
 
         # Se estiver ligado ao Turso pela primeira vez, importa os dados iniciais de inSID.db
         _migrar_seed_local_para_turso_se_vazio(conn)
+
+        # Garante que bases Turso já existentes recebem novos modos de falha e regras do catálogo seed
+        _sincronizar_catalogo_seed_para_turso(conn)
 
         # Fallbacks mínimos caso não exista inSID.db seed
         if not cursor.execute("SELECT 1 FROM tipos_barragem LIMIT 1").fetchone():
