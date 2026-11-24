@@ -2321,10 +2321,14 @@ def pagina_cadastro():
             organizacao = st.text_input("Organização", max_chars=100)
 
         with col2:
-            email = st.text_input("Email", max_chars=100)
-            senha = st.text_input("Senha", type="password", max_chars=50)
-            confirmar_senha = st.text_input("Confirmar Senha", type="password", max_chars=50)
-            ativo = st.selectbox("Usuário Ativo?", ["sim", "não"])
+            email = st.text_input("E-mail", max_chars=100)
+            senha = st.text_input("Palavra-passe", type="password", max_chars=50)
+            confirmar_senha = st.text_input("Confirmar Palavra-passe", type="password", max_chars=50)
+            eh_super_admin = bool(st.session_state.get("logado")) and obter_perfil_atual() == ROLE_SUPER_ADMIN
+            if eh_super_admin:
+                ativo = st.selectbox("Utilizador Ativo?", ["sim", "não"])
+            else:
+                ativo = "sim"
 
         enviar = st.form_submit_button("Cadastrar")
 
@@ -2920,7 +2924,7 @@ def identificar_modo_falha_provavel(barragem_id):
         
         st.subheader(f"🔍 Análise para Barragem (Tipo: {tipo_barragem['tipo_nome']})")
         
-        if st.button("🔍 Calcular Modo de Falha Provável", type="primary"):
+        if st.button("🔍 Pesquisar modo de falha", type="primary"):
             with st.spinner("Processando critérios de análise..."):
                 # 1. Obter modos de falha associados ao tipo desta barragem (incluindo imagem e descrição)
                 modos_falha = pd.read_sql(f"""
@@ -2989,24 +2993,37 @@ def identificar_modo_falha_provavel(barragem_id):
                     for a_id, z_id in df_az.itertuples(index=False):
                         zonas_por_anomalia.setdefault(int(a_id), set()).add(int(z_id))
 
-                # 3. Para cada modo de falha cadastrado para este tipo de barragem, calcular o score
+                # 3. Para cada modo de falha cadastrado para este tipo de barragem, calcular a compatibilidade (%)
+                # Fórmula inSID: Compatibilidade (%) = (soma dos pesos das anomalias do modo presentes na barragem / soma total dos pesos do modo) * 100.
+                # Quando todas as anomalias cadastradas no modo de falha estão presentes na barragem -> 100.0%.
                 for _, mf in modos_falha.iterrows():
-                    score_total = 0.0
-                    anomalias_contribuintes = []
                     mf_id_int = int(mf['id'])
                     anomalias_sistema = todas_anomalias_sistema[todas_anomalias_sistema['modos_falha_id'] == mf_id_int]
+                    peso_total_modo_falha = float(anomalias_sistema['peso'].sum()) if not anomalias_sistema.empty else 0.0
+                    contribuicao_total = 0.0
+                    anomalias_contribuintes = []
+                    anomalias_sistema_contabilizadas = set()
 
-                    # Para cada anomalia observada, verificar correspondência
-                    for _, obs in anomalias_obs.iterrows():
-                        for _, anom in anomalias_sistema.iterrows():
+                    for _, anom in anomalias_sistema.iterrows():
+                        anom_id_int = int(anom['id'])
+                        mats_validos = materiais_por_anomalia.get(anom_id_int, set())
+                        zonas_validas = zonas_por_anomalia.get(anom_id_int, set())
+
+                        for _, obs in anomalias_obs.iterrows():
                             if anom['tipo_anomalia_id'] == obs['tipo_anomalia_id']:
-                                anom_id_int = int(anom['id'])
-                                material_match = int(obs['material_id']) in materiais_por_anomalia.get(anom_id_int, set())
-                                zona_match = int(obs['zona_id']) in zonas_por_anomalia.get(anom_id_int, set())
+                                material_match = int(obs['material_id']) in mats_validos
+                                zona_match = int(obs['zona_id']) in zonas_validas
 
                                 if material_match and zona_match:
-                                    contribuicao = anom['peso'] * (1 + 0.5 * material_match + 0.5 * zona_match)
-                                    score_total += contribuicao
+                                    # Cada anomalia do modo de falha conta no máximo uma vez no somatório de pesos
+                                    # para garantir que a presença total das anomalias do modo corresponda exatamente a 100%
+                                    peso_anom = float(anom['peso'])
+                                    if anom_id_int not in anomalias_sistema_contabilizadas:
+                                        contribuicao_total += peso_anom
+                                        anomalias_sistema_contabilizadas.add(anom_id_int)
+                                        contrib_exibida = peso_anom
+                                    else:
+                                        contrib_exibida = 0.0
 
                                     anomalias_contribuintes.append({
                                         'anomalia_obs_id': obs['id'],
@@ -3015,57 +3032,62 @@ def identificar_modo_falha_provavel(barragem_id):
                                         'anomalia_sistema_nome': anom['nome_anomalia'],
                                         'material': obs['material_nome'],
                                         'zona': obs['zona_nome'],
-                                        'peso': anom['peso'],
-                                        'contribuicao': contribuicao
+                                        'peso': peso_anom,
+                                        'contribuicao': contrib_exibida
                                     })
+
+                    compatibilidade = (
+                        (contribuicao_total / peso_total_modo_falha) * 100.0
+                        if peso_total_modo_falha > 0 and contribuicao_total > 0
+                        else 0.0
+                    )
 
                     resultados.append({
                         'modo_falha_id': mf['id'],
                         'modo_falha_nome': mf['nome'],
                         'modo_falha_descricao': mf['descricao'],
                         'modo_falha_imagem': mf['image_path'],
-                        'score_total': score_total,
+                        'peso_total_modo': peso_total_modo_falha,
+                        'contribuicao_total': contribuicao_total,
+                        'score_total': compatibilidade,
+                        'compatibilidade': compatibilidade,
                         'anomalias_contribuintes': anomalias_contribuintes
                     })
 
-                # Ordenar por score (desc) e nome (asc)
-                resultados.sort(key=lambda x: (-x['score_total'], str(x['modo_falha_nome'])))
-
-                # Normalizar scores para percentagem
-                total_score = sum(r['score_total'] for r in resultados)
-                for r in resultados:
-                    r['probabilidade'] = (r['score_total'] / total_score) * 100 if total_score > 0 else 0.0
+                # Ordenar por compatibilidade (desc) e nome (asc)
+                resultados.sort(key=lambda x: (-x['compatibilidade'], str(x['modo_falha_nome'])))
 
                 # Exibir resultados
-                if total_score > 0:
+                max_compat = max((r['compatibilidade'] for r in resultados), default=0.0)
+                if max_compat > 0:
                     st.success(f"🎯 Resultados da Análise ({len(resultados)} modos de falha avaliados para este tipo de barragem)")
                 else:
                     st.warning(f"⚠️ Nenhum dos {len(resultados)} modos de falha cadastrados atingiu correspondência completa (tipo + zona + material) com as anomalias observadas.")
 
-                # Gráfico de probabilidades (todos os modos de falha cadastrados para o tipo de barragem)
+                # Gráfico de compatibilidade (todos os modos de falha cadastrados para o tipo de barragem)
                 df_plot = pd.DataFrame({
                     'Modo de Falha': [r['modo_falha_nome'] for r in resultados],
-                    'Probabilidade (%)': [r['probabilidade'] for r in resultados]
+                    'Compatibilidade (%)': [r['compatibilidade'] for r in resultados]
                 })
 
                 fig = px.bar(
                     df_plot,
                     x='Modo de Falha',
-                    y='Probabilidade (%)',
+                    y='Compatibilidade (%)',
                     color='Modo de Falha',
-                    text='Probabilidade (%)',
-                    title=f"Probabilidade por Modo de Falha — Todos os {len(resultados)} modos cadastrados ({tipo_barragem['tipo_nome']})",
-                    labels={'Probabilidade (%)': 'Probabilidade (%)'}
+                    text='Compatibilidade (%)',
+                    title=f"Compatibilidade com Modo de Falha — Todos os {len(resultados)} modos cadastrados ({tipo_barragem['tipo_nome']})",
+                    labels={'Compatibilidade (%)': 'Compatibilidade (%)'}
                 )
                 fig.update_traces(texttemplate='%{text:.1f}%', textposition='outside')
-                fig.update_layout(showlegend=False, xaxis_tickangle=-35)
+                fig.update_layout(showlegend=False, xaxis_tickangle=-35, yaxis=dict(range=[0, 110]))
                 st.plotly_chart(fig, use_container_width=True)
 
                 # Tabela detalhada com imagens e descrições
                 st.subheader(f"📊 Detalhes da Análise ({len(resultados)} Modos de Falha)")
 
                 for res in resultados:
-                    with st.expander(f"{res['modo_falha_nome']} ({res['probabilidade']:.1f}%)"):
+                    with st.expander(f"{res['modo_falha_nome']} ({res['compatibilidade']:.1f}%)"):
                         col1, col2 = st.columns([1, 2])
 
                         with col1:
@@ -3086,7 +3108,10 @@ def identificar_modo_falha_provavel(barragem_id):
                             st.write("**Descrição:**")
                             st.write(res['modo_falha_descricao'] or "Sem descrição disponível")
 
-                        st.write(f"**Score Total:** {res['score_total']:.2f}")
+                        st.write(
+                            f"**Compatibilidade:** {res['compatibilidade']:.1f}% "
+                            f"(Peso compatível: {res['contribuicao_total']:.2f} / Peso total do modo: {res['peso_total_modo']:.2f})"
+                        )
 
                         if res['anomalias_contribuintes']:
                             df_contrib = pd.DataFrame(res['anomalias_contribuintes'])
@@ -3095,7 +3120,7 @@ def identificar_modo_falha_provavel(barragem_id):
                                           'material', 'zona', 'peso', 'contribuicao']],
                                 column_config={
                                     'contribuicao': st.column_config.NumberColumn(
-                                        'Contribuição',
+                                        'Peso Contabilizado',
                                         format="%.2f"
                                     ),
                                     'peso': st.column_config.NumberColumn(
