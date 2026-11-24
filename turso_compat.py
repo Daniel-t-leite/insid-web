@@ -152,17 +152,26 @@ class TursoCursor:
         return iter(self.fetchall())
 
 
+from requests.adapters import HTTPAdapter
+
+_SHARED_SESSION = requests.Session()
+_ADAPTER = HTTPAdapter(pool_connections=16, pool_maxsize=16)
+_SHARED_SESSION.mount("https://", _ADAPTER)
+_SHARED_SESSION.mount("http://", _ADAPTER)
+
+
 class TursoConnection:
-    """Conexão compatível com sqlite3.Connection usando Turso HTTP API v2."""
+    """Conexão compatível com sqlite3.Connection usando Turso HTTP API v2 com pool Keep-Alive."""
 
     def __init__(self, url: str, auth_token: str, timeout: int = 20):
         self._endpoint = _normalizar_url_turso(url)
         self._headers = {
             "Authorization": f"Bearer {auth_token.strip()}",
             "Content-Type": "application/json",
+            "Connection": "keep-alive",
         }
         self._timeout = timeout
-        self._session = requests.Session()
+        self._session = _SHARED_SESSION
 
     def _pipeline(self, requests_list: List[dict]) -> List[dict]:
         try:
@@ -207,10 +216,8 @@ class TursoConnection:
         pass
 
     def close(self) -> None:
-        try:
-            self._session.close()
-        except Exception:
-            pass
+        # Mantém a sessão HTTP partilhada aberta para reutilização TLS/Keep-Alive
+        pass
 
     def __enter__(self) -> "TursoConnection":
         return self

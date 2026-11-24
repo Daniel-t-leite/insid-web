@@ -141,12 +141,29 @@ def pagina_inicial_por_perfil(role: str) -> str:
     return "fila_aprovacoes" if role == ROLE_APPROVER else "principal"
 
 
+@st.cache_data(ttl=120, show_spinner=False)
+def obter_tipos_barragem_cached():
+    return obter_tipos_barragem()
+
+
+@st.cache_data(ttl=20, show_spinner=False)
+def contar_propostas_pendentes_cached() -> int:
+    return contar_propostas_pendentes()
+
+
+def limpar_cache_dados() -> None:
+    try:
+        st.cache_data.clear()
+    except Exception:
+        pass
+
+
 def exibir_aviso_workflow_config() -> None:
     role = obter_perfil_atual()
     if role == ROLE_USER:
         st.info(t("workflow_user_banner"))
     elif can_approve_configs(role):
-        pend = contar_propostas_pendentes()
+        pend = contar_propostas_pendentes_cached()
         if pend > 0:
             st.caption(t("workflow_pending_caption", count=pend))
 
@@ -168,6 +185,7 @@ def executar_alteracao_config_ui(
         payload=payload,
         target_id=target_id,
     )
+    limpar_cache_dados()
     if res["status"] == "pending":
         st.info(t("workflow_submitted_pending", req_id=res["request_id"]))
         return False
@@ -209,6 +227,7 @@ def pagina_fila_aprovacoes():
                         if st.button(t("approvals_btn_approve"), key=f"aprov_{prop['id']}", type="primary"):
                             try:
                                 aprovar_proposta_configuracao(prop["id"], st.session_state["usuario_id"], role, nota)
+                                limpar_cache_dados()
                                 st.success(t("approvals_approved_ok", req_id=prop["id"]))
                                 st.rerun()
                             except Exception as e:
@@ -217,6 +236,7 @@ def pagina_fila_aprovacoes():
                         if st.button(t("approvals_btn_reject"), key=f"rej_{prop['id']}"):
                             try:
                                 rejeitar_proposta_configuracao(prop["id"], st.session_state["usuario_id"], role, nota)
+                                limpar_cache_dados()
                                 st.warning(t("approvals_rejected_ok", req_id=prop["id"]))
                                 st.rerun()
                             except Exception as e:
@@ -2125,7 +2145,7 @@ def editar_barragem(barragem):
 
 
         # Lista de tipos de barragem: (id, nome)
-        tipos = obter_tipos_barragem()
+        tipos = obter_tipos_barragem_cached()
 
         # Criar dicionário nome -> id
         opcoes = {t[2]: t[0] for t in tipos}
@@ -2561,6 +2581,7 @@ def obter_anomalias_barragem(barragem_id: int) -> List[Tuple]:
 #         if conn:
 #             conn.close()
 
+@st.cache_data(ttl=120, show_spinner=False)
 def obter_tipos_anomalia(usuario_id: int = None) -> List[Tuple]:
     """
     Obtém todos os tipos de anomalia cadastrados no sistema
@@ -2600,6 +2621,7 @@ def obter_tipos_anomalia(usuario_id: int = None) -> List[Tuple]:
         if conn:
             conn.close()
 
+@st.cache_data(ttl=120, show_spinner=False)
 def obter_tipos_zonas_bar() -> List[Tuple]:
     """
     Obtém todas as zonas de barragem disponíveis
@@ -2659,6 +2681,7 @@ def obter_tipos_zonas_bar() -> List[Tuple]:
 #             conn.close()
 
 
+@st.cache_data(ttl=120, show_spinner=False)
 def obter_tipos_materiais(usuario_id: int = None) -> List[Tuple]:
     """
     Obtém todos os tipos de materiais cadastrados no sistema
@@ -2888,12 +2911,15 @@ def inicializar_zonas_padrao():
 
 def identificar_modo_falha_provavel(barragem_id):
     """
-    Identifica o modo de falha mais provável considerando:
+    Identifica o modo de falha mais compatível considerando:
     1. Correspondência entre tipo de barragem e modos de falha
     2. Tipo de material da anomalia observada vs materiais associados às anomalias do sistema
     3. Zona da anomalia observada vs zonas associadas às anomalias do sistema
     4. Peso das anomalias para cada modo de falha
     """
+    if not st.button("Pesquisar modo de falha", type="primary"):
+        return
+
     role = obter_perfil_atual()
     usuario_id = st.session_state.get('usuario_id')
     if not obter_barragem_autorizada(role, usuario_id, barragem_id):
@@ -2901,30 +2927,30 @@ def identificar_modo_falha_provavel(barragem_id):
         return
 
     conn = conectar_db()
-    
+
     try:
         # Verifica se existem anomalias observadas para esta barragem
         count_anomalias = pd.read_sql(
-            f"SELECT COUNT(*) FROM anomalias_observadas WHERE barragem_id = {barragem_id}", 
+            f"SELECT COUNT(*) FROM anomalias_observadas WHERE barragem_id = {barragem_id}",
             conn
-        ).iloc[0,0]
-        
+        ).iloc[0, 0]
+
         if count_anomalias == 0:
-            st.info("ℹ️ Adicione pelo menos uma anomalia observada para identificar o modo de falha provável.")
+            st.info("Adicione pelo menos uma anomalia observada para identificar o modo de falha provável.")
             return
-        
+
         # Obter o tipo da barragem em análise
         tipo_barragem = pd.read_sql(
-            f"""SELECT b.tipo_id, tb.nome as tipo_nome 
+            f"""SELECT b.tipo_id, tb.nome as tipo_nome
                 FROM barragens b
                 JOIN tipos_barragem tb ON b.tipo_id = tb.id
                 WHERE b.id = {barragem_id}""",
             conn
         ).iloc[0]
-        
+
         st.subheader(f"Análise para Barragem (Tipo: {tipo_barragem['tipo_nome']})")
-        
-        if st.button("Pesquisar modo de falha", type="primary"):
+
+        if True:
             with st.spinner("Processando critérios de análise..."):
                 # 1. Obter modos de falha associados ao tipo desta barragem (incluindo imagem e descrição)
                 modos_falha = pd.read_sql(f"""
@@ -3180,8 +3206,10 @@ def pagina_principal():
     st.title(titulo)
     st.markdown(t("logged_user_line", name=st.session_state['usuario_nome'], role=rotulo_perfil(role)))
 
-    # Inicializar zonas padrão se necessário
-    inicializar_zonas_padrao()
+    # Inicializar zonas padrão apenas uma vez por sessão
+    if not st.session_state.get("_zonas_init_ok"):
+        inicializar_zonas_padrao()
+        st.session_state["_zonas_init_ok"] = True
 
     # Barra de seleção de barragem em análise (com isolamento estrito por perfil)
     st.subheader(t("dam_in_analysis"))
@@ -3226,12 +3254,12 @@ def pagina_principal():
                 editar_barragem(barragem_analise)
 
             # === ANOMALIAS ===
-            st.subheader("🚨 Anomalias Observadas")
-            tab_listar, tab_adicionar, tab_editar = st.tabs(["📋 Listar Anomalias", "➕ Adicionar Anomalia", "✏️ Editar/Excluir"])
+            st.subheader("Anomalias Observadas")
+            anomalias = obter_anomalias_barragem(barragem_analise[0])
+            tab_listar, tab_adicionar, tab_editar = st.tabs(["Listar Anomalias", "Adicionar Anomalia", "Editar/Excluir"])
 
             with tab_listar:
-                st.write("### Lista de Anomalias Registradas")
-                anomalias = obter_anomalias_barragem(barragem_analise[0])
+                st.write("### Lista de Anomalias Registadas")
                 if anomalias:
                     for anomalia in anomalias:
                         # with st.expander(f"Anomalia #{anomalia[0]} - {anomalia[3]}"):
@@ -3329,7 +3357,6 @@ def pagina_principal():
 
             with tab_editar:
                 st.write("### Editar ou Excluir Anomalias")
-                anomalias = obter_anomalias_barragem(barragem_analise[0])
                 if anomalias:
                     anomalia_selecionada = st.selectbox(
                         "Selecione a anomalia para edição/exclusão",
@@ -3447,7 +3474,7 @@ def menu_lateral():
                 if st.button(t("nav_manage_users"), use_container_width=True):
                     redirecionar = "admin_usuarios"
             if can_approve_configs(role):
-                qtd_pend = contar_propostas_pendentes()
+                qtd_pend = contar_propostas_pendentes_cached()
                 if st.button(t("nav_approval_queue", count=qtd_pend), use_container_width=True):
                     redirecionar = "fila_aprovacoes"
         else:
