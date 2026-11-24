@@ -18,11 +18,23 @@ Guia objetivo para colocar a aplicação **inSID Platform** em produção gratui
 
 ---
 
-## 2. Nota Importante sobre Persistência de Dados (`inSID.db` e `uploads/`)
+## 2. Persistência Permanente na Nuvem com Turso (\$0/mês — 5 GB, sem cartão)
 
-- A aplicação inclui a base de dados pré-populada `inSID.db` e as imagens em `uploads/modos_falha/` versionadas no repositório, pelo que arranca imediatamente funcional com os 14 modos de falha e exemplos.
-- **Limitação do plano gratuito (\$0/mês):** O sistema de ficheiros do Streamlit Community Cloud é **efémero**. Novos registos criados em execução (novas barragens, anomalias observadas ou novas imagens carregadas) persistem enquanto o contentor estiver ativo, mas são **repostos para o estado do GitHub** quando a aplicação reinicia ou após um novo deploy.
-- **Evolução recomendada para produção multi-utilizador (opcional, também \$0/mês):** Migrar `db.py` para uma base de dados SQLite/Postgres gerida na nuvem (ex.: **Turso/libSQL**, **Neon** ou **Supabase**), guardando as credenciais em *Streamlit Secrets* (`st.secrets`).
+No Streamlit Community Cloud, o disco local é apagado sempre que a aplicação reinicia. Para garantir que **nenhuma alteração (utilizadores, barragens, anomalias ou fotos) se perde**, ligue a base de dados gratuita **Turso**:
+
+1. Aceda a https://app.turso.tech/ e crie conta gratuita com o seu **GitHub** *(sem cartão de crédito; 5 GB gratuitos)*.
+2. Clique em **Create Database** → dê o nome **`insid-web`** (escolha a região mais próxima, ex.: Frankfurt/Madrid/Londres) → clique em **Create**.
+3. Na página da base de dados `insid-web`, copie:
+   - O **Database URL** (`libsql://insid-web-...turso.io`)
+   - Clique em **Create Token** (permissão *Read & Write*, sem expiração) e copie o **Auth Token**.
+4. No **Streamlit Community Cloud** → **Settings → Secrets**, cole exatamente estas duas linhas e clique em **Save**:
+
+```toml
+TURSO_DATABASE_URL = "libsql://insid-web-seu-usuario.turso.io"
+TURSO_AUTH_TOKEN = "COLE_O_SEU_TOKEN_AQUI"
+```
+
+5. **Auto-migração automática:** Na primeira vez que abrir a app no Streamlit Cloud com estas *Secrets*, a plataforma migra automaticamente todos os dados iniciais de `inSID.db` (utilizadores, 14 modos de falha, anomalias e barragens) para o Turso. A partir desse momento, **todas as alterações e novas imagens ficam guardadas permanentemente no Turso**!
 
 ---
 

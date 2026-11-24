@@ -1,21 +1,98 @@
+import base64
 import os
 import sqlite3
 from contextlib import closing
 import hashlib
 from pathlib import Path
 import pandas as pd
-from typing import Optional
+from typing import Optional, Tuple
+
+from turso_compat import TursoConnection
 
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "inSID.db"
+
+
+def _obter_config_turso() -> Tuple[Optional[str], Optional[str]]:
+    """Lê credenciais Turso de st.secrets (Streamlit Cloud) ou variáveis de ambiente."""
+    url = os.environ.get("TURSO_DATABASE_URL", "").strip()
+    token = os.environ.get("TURSO_AUTH_TOKEN", "").strip()
+    if not (url and token):
+        try:
+            import streamlit as st
+            url = url or str(st.secrets.get("TURSO_DATABASE_URL", "")).strip()
+            token = token or str(st.secrets.get("TURSO_AUTH_TOKEN", "")).strip()
+        except Exception:
+            pass
+    if url and token:
+        return url, token
+    return None, None
+
+
+def usando_turso() -> bool:
+    """Indica se a aplicação está ligada à base de dados persistente Turso na nuvem."""
+    url, token = _obter_config_turso()
+    return bool(url and token)
+
 
 def hash_senha(senha):
     """Gera hash SHA-256 para senhas"""
     return hashlib.sha256(senha.encode()).hexdigest()
 
+
 def conectar_db():
-    """Estabelece conexão com o banco de dados SQLite usando caminho relativo ao módulo"""
+    """Estabelece conexão com Turso (produção na nuvem) ou SQLite local (desenvolvimento)."""
+    url, token = _obter_config_turso()
+    if url and token:
+        return TursoConnection(url, token)
     return sqlite3.connect(str(DB_PATH))
+
+
+def _migrar_seed_local_para_turso_se_vazio(conn) -> None:
+    """Na primeira execução no Turso, importa automaticamente os dados iniciais de inSID.db."""
+    if not isinstance(conn, TursoConnection) or not DB_PATH.exists():
+        return
+    cur = conn.cursor()
+    if cur.execute("SELECT 1 FROM modos_falha LIMIT 1").fetchone():
+        return
+
+    tabelas_ordenadas = [
+        "usuarios",
+        "tipos_fundacao",
+        "categorias_anomalias",
+        "tipos_barragem",
+        "tipos_materiais",
+        "tipos_zonas_bar",
+        "tipo_modo_falha",
+        "tipo_anomalia",
+        "barragens",
+        "usuario_barragem_analise",
+        "modos_falha",
+        "modos_falha_tipo_barragem",
+        "anomalias",
+        "anomalia_zona",
+        "anomalia_tipo_material",
+        "anomalias_observadas",
+    ]
+    with closing(sqlite3.connect(str(DB_PATH))) as local_conn:
+        lcur = local_conn.cursor()
+        for tabela in tabelas_ordenadas:
+            existe = lcur.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (tabela,)
+            ).fetchone()
+            if not existe:
+                continue
+            rows = lcur.execute(f'SELECT * FROM "{tabela}"').fetchall()
+            if not rows:
+                continue
+            cols = [d[0] for d in lcur.description]
+            placeholders = ", ".join(["?"] * len(cols))
+            col_list = ", ".join(f'"{c}"' for c in cols)
+            cur.executemany(
+                f'INSERT OR IGNORE INTO "{tabela}" ({col_list}) VALUES ({placeholders})',
+                rows,
+            )
+
 
 def inicializar_bd():
     with closing(conectar_db()) as conn:
@@ -36,14 +113,14 @@ def inicializar_bd():
         );
         """)
 
-        # Garante um utilizador administrador inicial apenas se a BD for criada do zero
-        if not cursor.execute("SELECT 1 FROM usuarios LIMIT 1").fetchone():
-            senha_inicial = os.environ.get("INSID_ADMIN_PASSWORD", "admin123")
-            cursor.execute(
-                """INSERT INTO usuarios (codigo, nome, email, funcao, organizacao, senha_hash, ativo, is_admin)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                ("1", "Administrador", "admin@insid.com", "Administrador", "inSID", hash_senha(senha_inicial), "sim", 1)
-            )
+        # Tabela de persistência de imagens enviadas pelos utilizadores (evita perda em disco efémero)
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS midia_uploads (
+            caminho TEXT PRIMARY KEY,
+            conteudo_b64 TEXT NOT NULL,
+            criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        """)
 
         # Tipos de Fundação
         cursor.execute("""
@@ -259,7 +336,62 @@ def inicializar_bd():
         );
         """)
 
+        # Se estiver ligado ao Turso pela primeira vez, importa os dados iniciais de inSID.db
+        _migrar_seed_local_para_turso_se_vazio(conn)
+
+        # Garante um utilizador administrador inicial apenas se a BD continuar sem utilizadores
+        if not cursor.execute("SELECT 1 FROM usuarios LIMIT 1").fetchone():
+            senha_inicial = os.environ.get("INSID_ADMIN_PASSWORD", "admin123")
+            cursor.execute(
+                """INSERT INTO usuarios (codigo, nome, email, funcao, organizacao, senha_hash, ativo, is_admin)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                ("1", "Administrador", "admin@insid.com", "Administrador", "inSID", hash_senha(senha_inicial), "sim", 1)
+            )
+
         conn.commit()
+
+
+# ---------- Persistência de Imagens em Base de Dados ----------
+def salvar_midia_db(caminho: str, dados: bytes) -> None:
+    """Guarda uma imagem em base64 na base de dados para sobreviver a reinícios efémeros."""
+    caminho_norm = str(caminho).replace("\\", "/").strip()
+    conteudo_b64 = base64.b64encode(dados).decode("ascii")
+    with closing(conectar_db()) as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT OR REPLACE INTO midia_uploads (caminho, conteudo_b64) VALUES (?, ?)",
+            (caminho_norm, conteudo_b64),
+        )
+        conn.commit()
+
+
+def carregar_midia_db(caminho: str) -> Optional[bytes]:
+    """Recupera os bytes de uma imagem persistida na base de dados."""
+    caminho_norm = str(caminho).replace("\\", "/").strip()
+    try:
+        with closing(conectar_db()) as conn:
+            cur = conn.cursor()
+            row = cur.execute(
+                "SELECT conteudo_b64 FROM midia_uploads WHERE caminho = ?",
+                (caminho_norm,),
+            ).fetchone()
+            if row and row[0]:
+                return base64.b64decode(row[0])
+    except Exception:
+        return None
+    return None
+
+
+def remover_midia_db(caminho: str) -> None:
+    """Remove uma imagem persistida da base de dados."""
+    caminho_norm = str(caminho).replace("\\", "/").strip()
+    try:
+        with closing(conectar_db()) as conn:
+            cur = conn.cursor()
+            cur.execute("DELETE FROM midia_uploads WHERE caminho = ?", (caminho_norm,))
+            conn.commit()
+    except Exception:
+        pass
 
 
 # ---------- Operações de Usuário ----------

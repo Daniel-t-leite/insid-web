@@ -18,7 +18,7 @@ ALLOWED_IMAGE_EXTS = {".jpg", ".jpeg", ".png"}
 
 
 def resolver_caminho_arquivo(caminho: Optional[str]) -> Optional[Path]:
-    """Resolve caminhos relativos ao diretório da aplicação de forma segura (Windows/Linux)."""
+    """Resolve caminhos relativos ao diretório da aplicação e restaura uploads da BD se o disco reiniciar."""
     if not caminho:
         return None
     normalizado = str(caminho).replace("\\", "/").strip()
@@ -31,11 +31,23 @@ def resolver_caminho_arquivo(caminho: Optional[str]) -> Optional[Path]:
         candidato.relative_to(BASE_DIR)
     except ValueError:
         return None
-    return candidato if candidato.exists() else None
+    if candidato.exists():
+        return candidato
+    # Se o disco efémero foi reiniciado, restaura a imagem a partir da BD persistente (Turso/SQLite)
+    dados = carregar_midia_db(normalizado)
+    if dados:
+        try:
+            candidato.parent.mkdir(parents=True, exist_ok=True)
+            with open(candidato, "wb") as f:
+                f.write(dados)
+            return candidato
+        except OSError:
+            return None
+    return None
 
 
 def salvar_arquivo_upload(arquivo, subpasta: str, prefixo: str, max_mb: int = 5) -> Optional[str]:
-    """Valida e grava um ficheiro de imagem em uploads/<subpasta> devolvendo caminho POSIX relativo."""
+    """Valida, grava em uploads/<subpasta> e persiste na BD (Turso/SQLite) devolvendo caminho POSIX relativo."""
     if arquivo is None:
         return None
     try:
@@ -51,9 +63,12 @@ def salvar_arquivo_upload(arquivo, subpasta: str, prefixo: str, max_mb: int = 5)
         destino_dir = UPLOADS_DIR / subpasta
         destino_dir.mkdir(parents=True, exist_ok=True)
         destino = destino_dir / nome_arquivo
+        dados = bytes(arquivo.getbuffer())
         with open(destino, "wb") as f:
-            f.write(arquivo.getbuffer())
-        return f"uploads/{subpasta}/{nome_arquivo}"
+            f.write(dados)
+        caminho_rel = f"uploads/{subpasta}/{nome_arquivo}"
+        salvar_midia_db(caminho_rel, dados)
+        return caminho_rel
     except OSError:
         st.error("Não foi possível guardar a imagem no servidor. Tente novamente.")
         return None
@@ -68,8 +83,8 @@ from db import (
     definir_barragem_analise, obter_barragem_analise, 
     obter_barragens_usuario, atualizar_barragem, excluir_barragem, 
     cadastrar_barragem, listar_usuarios, atualizar_status_usuario, 
-    atualizar_admin_usuario, excluir_usuario
- 
+    atualizar_admin_usuario, excluir_usuario,
+    salvar_midia_db, carregar_midia_db, remover_midia_db
 )
 
 # Configuração da página
@@ -675,6 +690,8 @@ def gerenciar_modos_falha_anomalias():
                                     img_modo.unlink()
                                 except OSError:
                                     pass
+                            if modo_falha['image_path']:
+                                remover_midia_db(modo_falha['image_path'])
                             
                             st.success("Modo de falha excluído com sucesso!")
                             st.session_state.ultima_atualizacao = time.time()
@@ -1002,6 +1019,8 @@ def gerenciar_modos_falha_anomalias():
                                 img_anom.unlink()
                             except OSError:
                                 pass
+                        if anomalia['image_path']:
+                            remover_midia_db(anomalia['image_path'])
                         
                         st.success("Anomalia e relacionamentos excluídos com sucesso!")
                         st.session_state.ultima_atualizacao = time.time()
