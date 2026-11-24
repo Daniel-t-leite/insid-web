@@ -104,7 +104,7 @@ def _sincronizar_catalogo_seed_para_turso(conn) -> None:
     if not usando_turso() or not DB_PATH.exists():
         return
 
-    sync_key = "catalog_sync_insid_platform_v3"
+    sync_key = "catalog_sync_insid_platform_v4"
     cur = conn.cursor()
     cur.execute(
         "CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT)"
@@ -125,6 +125,10 @@ def _sincronizar_catalogo_seed_para_turso(conn) -> None:
         "tipo_anomalia",
         "modos_falha",
         "anomalias",
+    ]
+    tabelas_dados_aditivos = [
+        "barragens",
+        "anomalias_observadas",
     ]
     tabelas_juncao = [
         "modos_falha_tipo_barragem",
@@ -198,6 +202,29 @@ def _sincronizar_catalogo_seed_para_turso(conn) -> None:
                     f'INSERT OR IGNORE INTO "{tabela}" ({col_list}) VALUES ({placeholders})',
                     rows,
                 )
+
+        # 4. Acrescentar barragens e anomalias observadas em falta (INSERT OR IGNORE preserva registos online)
+        for tabela in tabelas_dados_aditivos:
+            existe = lcur.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (tabela,)
+            ).fetchone()
+            if not existe:
+                continue
+            rows = lcur.execute(f'SELECT * FROM "{tabela}"').fetchall()
+            if not rows:
+                continue
+            cols = [d[0] for d in lcur.description]
+            placeholders = ", ".join(["?"] * len(cols))
+            col_list = ", ".join(f'"{c}"' for c in cols)
+            cur.executemany(
+                f'INSERT OR IGNORE INTO "{tabela}" ({col_list}) VALUES ({placeholders})',
+                rows,
+            )
+
+        if _coluna_existe(cur, "barragens", "owner_id"):
+            cur.execute(
+                "UPDATE barragens SET owner_id = CAST(usuario_id AS TEXT) WHERE owner_id IS NULL OR TRIM(owner_id) = ''"
+            )
 
     cur.execute(
         "INSERT OR REPLACE INTO schema_meta (key, value) VALUES (?, 'done')",
