@@ -96,38 +96,58 @@ def _migrar_seed_local_para_turso_se_vazio(conn) -> None:
 
 def _sincronizar_catalogo_seed_para_turso(conn) -> None:
     """
-    Sincroniza (uma única vez, de forma idempotente e segura com foreign_keys=ON)
-    os modos de falha, tipos, zonas, anomalias e associações mais recentes de inSID.db
+    Sincroniza (uma única vez por versão, de forma idempotente e segura com foreign_keys=ON)
+    todo o catálogo técnico de inSID.db (tipos de barragem, zonas, materiais, tipos de anomalia,
+    categorias de modos de falha, modos de falha, pesos/regras de anomalias e associações)
     para uma base Turso já existente, sem apagar dados de utilizadores ou barragens.
     """
     if not usando_turso() or not DB_PATH.exists():
         return
 
+    sync_key = "catalog_sync_insid_platform_v3"
     cur = conn.cursor()
     cur.execute(
         "CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT)"
     )
     ja_aplicado = cur.execute(
-        "SELECT 1 FROM schema_meta WHERE key = 'catalog_sync_insid_platform_v2'"
+        "SELECT 1 FROM schema_meta WHERE key = ?", (sync_key,)
     ).fetchone()
     if ja_aplicado:
         return
 
-    tabelas_catalogo_ordenadas = [
+    tabelas_principais = [
+        "tipos_fundacao",
+        "categorias_anomalias",
         "tipos_barragem",
         "tipos_materiais",
         "tipos_zonas_bar",
         "tipo_modo_falha",
         "tipo_anomalia",
         "modos_falha",
-        "modos_falha_tipo_barragem",
         "anomalias",
+    ]
+    tabelas_juncao = [
+        "modos_falha_tipo_barragem",
         "anomalia_zona",
         "anomalia_tipo_material",
     ]
+    updates_por_tabela = [
+        ("tipos_fundacao", ["nome", "descricao"]),
+        ("categorias_anomalias", ["nome", "descricao"]),
+        ("tipos_barragem", ["nome", "descricao", "referencia_tecnica", "image_path"]),
+        ("tipos_materiais", ["nome", "descricao"]),
+        ("tipos_zonas_bar", ["nome", "descricao"]),
+        ("tipo_modo_falha", ["nome", "descricao", "referencia_tecnica"]),
+        ("tipo_anomalia", ["nome", "descricao", "image_path"]),
+        ("modos_falha", ["id_tipo_modo_falha", "nome", "descricao", "referencia_tecnica", "image_path"]),
+        ("anomalias", ["modos_falha_id", "tipo_anomalia_id", "gravidade", "peso", "image_path"]),
+    ]
+
     with closing(sqlite3.connect(str(DB_PATH))) as local_conn:
         lcur = local_conn.cursor()
-        for tabela in tabelas_catalogo_ordenadas:
+
+        # 1. Inserir registos novos em todas as tabelas principais
+        for tabela in tabelas_principais:
             existe = lcur.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (tabela,)
             ).fetchone()
@@ -144,18 +164,44 @@ def _sincronizar_catalogo_seed_para_turso(conn) -> None:
                 rows,
             )
 
-        # Atualizar nomes, descrições e imagens dos modos de falha já existentes (ex.: IDs 17 e 18)
-        mfs_seed = lcur.execute(
-            "SELECT nome, descricao, referencia_tecnica, image_path, id FROM modos_falha"
-        ).fetchall()
-        if mfs_seed:
+        # 2. Atualizar campos (nomes, descrições, referências, imagens, pesos) nos registos já existentes
+        for tabela, campos in updates_por_tabela:
+            existe = lcur.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (tabela,)
+            ).fetchone()
+            if not existe:
+                continue
+            select_cols = ", ".join(f'"{c}"' for c in campos) + ', "id"'
+            rows_upd = lcur.execute(f'SELECT {select_cols} FROM "{tabela}"').fetchall()
+            if not rows_upd:
+                continue
+            set_clause = ", ".join(f'"{c}" = ?' for c in campos)
             cur.executemany(
-                "UPDATE modos_falha SET nome = ?, descricao = ?, referencia_tecnica = ?, image_path = ? WHERE id = ?",
-                mfs_seed,
+                f'UPDATE "{tabela}" SET {set_clause} WHERE id = ?',
+                rows_upd,
             )
 
+        # 3. Espelhar exatamente as tabelas de junção (sem FKs filhas; seguro com foreign_keys=ON)
+        for tabela in tabelas_juncao:
+            existe = lcur.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (tabela,)
+            ).fetchone()
+            if not existe:
+                continue
+            rows = lcur.execute(f'SELECT * FROM "{tabela}"').fetchall()
+            cols = [d[0] for d in lcur.description]
+            placeholders = ", ".join(["?"] * len(cols))
+            col_list = ", ".join(f'"{c}"' for c in cols)
+            cur.execute(f'DELETE FROM "{tabela}"')
+            if rows:
+                cur.executemany(
+                    f'INSERT OR IGNORE INTO "{tabela}" ({col_list}) VALUES ({placeholders})',
+                    rows,
+                )
+
     cur.execute(
-        "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('catalog_sync_insid_platform_v2', 'done')"
+        "INSERT OR REPLACE INTO schema_meta (key, value) VALUES (?, 'done')",
+        (sync_key,),
     )
 
 
